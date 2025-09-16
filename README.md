@@ -23,7 +23,7 @@ Accept M-Pesa payments to any bank account through the Tuma Payments API in your
 ## Installation
 
 ### Step 4: Download and Install Plugin
-1. Download the plugin from [https://tuma.co.ke/wc-tuma.zip](https://tuma.co.ke/wc-tuma.zip)
+1. Download the plugin from [https://github.com/matatashadrack/tuma-mpesa-for-woocomerce/archive/refs/tags/v1.0.0.zip](https://github.com/matatashadrack/tuma-mpesa-for-woocomerce/archive/refs/tags/v1.0.0.zip)
 2. Upload the plugin to your WordPress site:
    - Go to **Plugins > Add New > Upload Plugin**
    - Choose the downloaded zip file and click **Install Now**

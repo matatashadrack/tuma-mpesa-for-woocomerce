@@ -83,7 +83,7 @@ Get instant Payment alerts via WhatsApp, Telegram and Slack.
 
 ## Troubleshooting
 
-### Common Issues
+### Common Issues/ FAQs
 
 1. **"Connection Failed" Error**
    - Verify your Shop Email and API Key are correct
@@ -94,7 +94,7 @@ Get instant Payment alerts via WhatsApp, Telegram and Slack.
    - Ensure the phone number format is correct (254XXXXXXXXX)
 
 3. **Payment Status Not Updating**
-   - Verify your webhook URL is accessible
+   
    - Check that your site has a valid SSL certificate
 
 ## Support and Resources

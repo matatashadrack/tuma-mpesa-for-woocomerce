@@ -3,7 +3,7 @@
 /**
  * @package Tuma Payments for WooCommerce
  * @author Tuma Payments < support@tuma.co.ke >
- * @version 1.0.0
+ * @version 1.1.0
  *
  * Plugin Name: Tuma Payments for WooCommerce
  * Plugin URI: https://merchant.tuma.co.ke/
@@ -85,6 +85,14 @@ add_action('wp_enqueue_scripts', function () {
         wp_enqueue_style("tuma-wc-styles", plugins_url("assets/styles.css", __FILE__));
         wp_enqueue_script('jquery');
         wp_enqueue_script("tuma-wc-scripts", plugins_url("assets/scripts.js", __FILE__), array("jquery"), false, true);
+    }
+});
+
+// Declare compatibility with WooCommerce features
+add_action('before_woocommerce_init', function() {
+    if (class_exists('\Automattic\WooCommerce\Utilities\FeaturesUtil')) {
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('custom_order_tables', __FILE__, true);
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('orders_cache', __FILE__, true);
     }
 });
 

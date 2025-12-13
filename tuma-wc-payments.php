@@ -9,14 +9,15 @@
  * Plugin URI: https://merchant.tuma.co.ke/
  * Description: This plugin extends WordPress and WooCommerce functionality to integrate your online shop with bank accounts to accept and process online payments via M-Pesa.
  * Author: Shadrack Matata < support@tuma.co.ke >
- * Version: 1.0.0
+ * Version: 1.1.0
  * Author URI: https://twitter.com/shadrac_matata/
  *
- * Requires at least: 4.6
- * Tested up to: 6.3
+ * Requires at least: 6.7
+ * Tested up to: 6.7
+ * Requires PHP: 7.4
  *
- * WC requires at least: 3.5.0
- * WC tested up to: 8.0
+ * WC requires at least: 8.0.0
+ * WC tested up to: 10.3.6
  *
  * License: GPLv3
  * License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -27,7 +28,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TUMA_WC_VER', '1.0.0');
+define('TUMA_WC_VER', '1.1.0');
 if (!defined('TUMA_WC_PLUGIN_FILE')) {
     define('TUMA_WC_PLUGIN_FILE', __FILE__);
 }
@@ -198,8 +199,8 @@ function init_tuma_payments_gateway() {
             <fieldset id="wc-<?php echo esc_attr($this->id); ?>-form" class='wc-payment-form' style='background:transparent;'>
                 <div class='form-row form-row-wide'>
                     <label>M-Pesa Phone Number <span class="required">*</span></label>
-                    <input id="tuma_phone" name="tuma_phone" type="tel" placeholder="0712345678" autocomplete="tel">
-                    <small>Enter your M-Pesa registered phone number</small>
+                    <input id="tuma_phone" name="tuma_phone" type="tel" placeholder="0712345678 or 254712345678" autocomplete="tel">
+                    <small>Enter your M-Pesa registered phone number (07xxxxxxxx, 01xxxxxxxx, or 254xxxxxxxxx)</small>
                 </div>
                 <div class='clear'></div>
             </fieldset>
@@ -214,18 +215,56 @@ function init_tuma_payments_gateway() {
 
             $phone = sanitize_text_field($_POST['tuma_phone']);
             
-            // Basic phone validation
-            if (!preg_match('/^(0|254)[0-9]{9}$/', $phone)) {
-                wc_add_notice('Please enter a valid M-Pesa phone number (e.g., 0712345678)', 'error');
+            // Validate and normalize phone number
+            $normalized_phone = $this->normalize_phone_number($phone);
+            if (!$normalized_phone) {
+                wc_add_notice('Please enter a valid M-Pesa phone number (e.g., 0712345678 or 254712345678)', 'error');
                 return false;
             }
 
             return true;
         }
 
+        /**
+         * Normalize phone number to 254 format
+         * Accepts: 07xxxxxxxx, 01xxxxxxxx, 254xxxxxxxxx, +254xxxxxxxxx
+         * Returns: 254xxxxxxxxx or false if invalid
+         */
+        private function normalize_phone_number($phone) {
+            // Remove any spaces, dashes, or other non-numeric characters except +
+            $phone = preg_replace('/[^0-9+]/', '', $phone);
+            
+            // Remove + prefix if present
+            $phone = ltrim($phone, '+');
+            
+            // Handle different formats
+            if (preg_match('/^07[0-9]{8}$/', $phone)) {
+                // 07xxxxxxxx -> 254xxxxxxxxx (take last 9 digits and prepend 254)
+                return '254' . substr($phone, -9);
+            } elseif (preg_match('/^01[0-9]{8}$/', $phone)) {
+                // 01xxxxxxxx -> 254xxxxxxxxx (take last 9 digits and prepend 254)
+                return '254' . substr($phone, -9);
+            } elseif (preg_match('/^254[71][0-9]{8}$/', $phone)) {
+                // 254xxxxxxxxx -> already in correct format (must start with 7 or 1 after 254)
+                return $phone;
+            }
+            
+            // If none of the above patterns match, try to extract last 9 digits and prepend 254
+            if (strlen($phone) >= 9) {
+                $last_nine = substr($phone, -9);
+                // Validate that the last 9 digits start with 7 or 1 (valid Kenyan mobile prefixes)
+                // 7 = Safaricom, 1 = Airtel
+                if (preg_match('/^[71][0-9]{8}$/', $last_nine)) {
+                    return '254' . $last_nine;
+                }
+            }
+            
+            return false; // Invalid phone number
+        }
+
         public function process_payment($order_id) {
             $order = wc_get_order($order_id);
-            $phone = sanitize_text_field($_POST['tuma_phone']);
+            $phone = $this->normalize_phone_number(sanitize_text_field($_POST['tuma_phone']));
 
             // Get access token from Tuma API
             $token = $this->get_access_token();
@@ -246,7 +285,7 @@ function init_tuma_payments_gateway() {
             $response = $this->make_stk_request($token, $payment_data);
 
             if ($response && isset($response['success']) && $response['success']) {
-                // Store payment details in order meta
+                // Store payment details in order meta (phone is already normalized)
                 $order->update_meta_data('_tuma_payment_id', $response['data']['payment_id']);
                 $order->update_meta_data('_tuma_merchant_request_id', $response['data']['merchant_request_id']);
                 $order->update_meta_data('_tuma_checkout_request_id', $response['data']['checkout_request_id']);
@@ -521,6 +560,12 @@ function init_tuma_payments_gateway() {
             
             if (!$phone) {
                 wp_send_json_error('Phone number not found');
+            }
+            
+            // Ensure phone is in normalized format
+            $phone = $this->normalize_phone_number($phone);
+            if (!$phone) {
+                wp_send_json_error('Invalid phone number format');
             }
             
             // Get access token

@@ -3,13 +3,13 @@
 /**
  * @package Tuma Payments for WooCommerce
  * @author Tuma Payments < support@tuma.co.ke >
- * @version 1.1.0
+ * @version 1.2.0
  *
  * Plugin Name: Tuma Payments for WooCommerce
  * Plugin URI: https://merchant.tuma.co.ke/
  * Description: This plugin extends WordPress and WooCommerce functionality to integrate your online shop with bank accounts to accept and process online payments via M-Pesa.
  * Author: Shadrack Matata < support@tuma.co.ke >
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author URI: https://twitter.com/shadrac_matata/
  *
  * Requires at least: 6.7
@@ -17,7 +17,7 @@
  * Requires PHP: 7.4
  *
  * WC requires at least: 8.0.0
- * WC tested up to: 10.3.6
+ * WC tested up to: 10.4.3
  *
  * License: GPLv3
  * License URI: http://www.gnu.org/licenses/gpl-3.0.html
@@ -28,7 +28,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TUMA_WC_VER', '1.1.0');
+define('TUMA_WC_VER', '1.2.0');
 if (!defined('TUMA_WC_PLUGIN_FILE')) {
     define('TUMA_WC_PLUGIN_FILE', __FILE__);
 }
@@ -93,7 +93,25 @@ add_action('before_woocommerce_init', function() {
     if (class_exists('\Automattic\WooCommerce\Utilities\FeaturesUtil')) {
         \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('custom_order_tables', __FILE__, true);
         \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('orders_cache', __FILE__, true);
+        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('cart_checkout_blocks', __FILE__, true);
     }
+});
+
+// Register WooCommerce Blocks support for Tuma Payments
+add_action('woocommerce_blocks_loaded', function() {
+    if (!class_exists('Automattic\WooCommerce\Blocks\Payments\Integrations\AbstractPaymentMethodType')) {
+        return;
+    }
+    
+    // Include the blocks integration class
+    require_once plugin_dir_path(__FILE__) . 'includes/class-tuma-blocks-support.php';
+    
+    add_action(
+        'woocommerce_blocks_payment_method_type_registration',
+        function(\Automattic\WooCommerce\Blocks\Payments\PaymentMethodRegistry $payment_method_registry) {
+            $payment_method_registry->register(new Tuma_Blocks_Support());
+        }
+    );
 });
 
 // Initialize the payment gateway
@@ -747,6 +765,38 @@ function init_tuma_payments_gateway() {
             }
         }
 
+        public function is_available() {
+            // Check if the gateway is enabled
+            if ('yes' !== $this->enabled) {
+                return false;
+            }
+
+            // Check if required settings are configured
+            if (empty($this->api_email) || empty($this->api_key)) {
+                return false;
+            }
+
+            // Check if WooCommerce is active
+            if (!class_exists('WooCommerce')) {
+                return false;
+            }
+
+            // Only check cart on frontend checkout pages
+            if (!is_admin() && (is_checkout() || is_checkout_pay_page())) {
+                // Check if we have a valid cart with items
+                if (WC()->cart && WC()->cart->is_empty()) {
+                    return false;
+                }
+
+                // Check if the total is greater than 0
+                if (WC()->cart && WC()->cart->get_total('') <= 0) {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
         public function payment_scripts() {
             if (!is_admin() && (!is_checkout() && !is_checkout_pay_page() && !is_order_received_page())) {
                 return;
@@ -807,14 +857,22 @@ function init_tuma_payments_gateway() {
             echo '</div>';
         }
     }
-
-    // Add the gateway to WooCommerce
-    function add_tuma_payments_gateway($gateways) {
-        $gateways[] = 'WC_Tuma_Payments_Gateway';
-        return $gateways;
-    }
-    add_filter('woocommerce_payment_gateways', 'add_tuma_payments_gateway');
 }
+
+// Add the gateway to WooCommerce
+function add_tuma_payments_gateway($gateways) {
+    $gateways[] = 'WC_Tuma_Payments_Gateway';
+    return $gateways;
+}
+add_filter('woocommerce_payment_gateways', 'add_tuma_payments_gateway');
+
+// Debug: Log available gateways at checkout
+add_action('woocommerce_review_order_before_payment', function() {
+    $available_gateways = WC()->payment_gateways()->get_available_payment_gateways();
+    error_log('Tuma Debug: Available gateways at checkout: ' . print_r(array_keys($available_gateways), true));
+    error_log('Tuma Debug: Cart needs payment: ' . (WC()->cart->needs_payment() ? 'YES' : 'NO'));
+    error_log('Tuma Debug: Cart total: ' . WC()->cart->get_total(''));
+});
 
 // AJAX handler for connection testing
 add_action('wp_ajax_tuma_test_connection', 'handle_tuma_test_connection');

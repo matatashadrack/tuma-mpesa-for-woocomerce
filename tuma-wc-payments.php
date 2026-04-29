@@ -149,6 +149,10 @@ function init_tuma_payments_gateway() {
             $this->api_key            = $this->get_option('api_key');
             $this->api_base_url       = 'https://api.tuma.co.ke';
 
+            // POS sync settings
+            $this->enable_pos_sync     = 'yes' === $this->get_option('enable_pos_sync');
+            $this->enable_product_sync = 'yes' === $this->get_option('enable_product_sync');
+
             // Initialize gateway settings
             add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
             
@@ -158,9 +162,13 @@ function init_tuma_payments_gateway() {
             add_action('woocommerce_api_tuma_resend', array($this, 'resend_payment_request'));
             add_action('woocommerce_api_tuma_status', array($this, 'get_payment_status'));
             
+            // POS sale callback handler
+            add_action('woocommerce_api_tuma_pos_callback', array($this, 'pos_sale_callback'));
+            
             // Hook thankyou page to show payment status
             add_action('woocommerce_thankyou_' . $this->id, array($this, 'thankyou_page'));
             add_action('woocommerce_admin_field_tuma_test_connection', array($this, 'generate_tuma_test_connection_html'));
+            add_action('woocommerce_admin_field_tuma_sync_products_button', array($this, 'generate_tuma_sync_products_button_html'));
             
             // Enqueue scripts on order received page
             add_action('wp_enqueue_scripts', array($this, 'payment_scripts'));
@@ -213,6 +221,32 @@ function init_tuma_payments_gateway() {
                     'title'       => 'Connection Status',
                     'type'        => 'tuma_test_connection',
                     'description' => 'Test your API credentials to verify connection.',
+                ),
+                'pos_sync_section' => array(
+                    'title'       => 'POS Inventory Sync',
+                    'type'        => 'title',
+                    'description' => 'Configure integration with Tuma POS inventory system.',
+                ),
+                'enable_pos_sync' => array(
+                    'title'       => 'Enable POS Sync',
+                    'type'        => 'checkbox',
+                    'label'       => 'Enable POS inventory synchronization',
+                    'description' => 'When enabled, orders will be synced with Tuma POS and inventory will be managed through the POS system.',
+                    'default'     => 'no',
+                    'desc_tip'    => true,
+                ),
+                'enable_product_sync' => array(
+                    'title'       => 'Enable Product Sync',
+                    'type'        => 'checkbox',
+                    'label'       => 'Automatically sync products from Tuma POS',
+                    'description' => 'When enabled, products from your Tuma POS will be automatically synced to WooCommerce hourly.',
+                    'default'     => 'no',
+                    'desc_tip'    => true,
+                ),
+                'sync_products_button' => array(
+                    'title'       => 'Manual Product Sync',
+                    'type'        => 'tuma_sync_products_button',
+                    'description' => 'Manually trigger a product sync from Tuma POS.',
                 ),
             );
         }
@@ -299,6 +333,12 @@ function init_tuma_payments_gateway() {
                 return array('result' => 'fail');
             }
 
+            // Check if POS sync is enabled - use Tuma Sales API instead
+            if ($this->enable_pos_sync) {
+                return $this->process_pos_sale_payment($order, $phone, $token);
+            }
+
+            // Standard payment flow (no POS sync)
             // Prepare payment data
             $payment_data = array(
                 'amount' => $order->get_total(),
@@ -337,6 +377,248 @@ function init_tuma_payments_gateway() {
                 return array('result' => 'fail');
             }
         }
+
+        /**
+         * Process payment through Tuma POS Sales API
+         * This syncs the order with POS inventory
+         */
+        private function process_pos_sale_payment($order, $phone, $token) {
+            $order_id = $order->get_id();
+            
+            // Build items array with Tuma product IDs
+            $items = array();
+            $missing_products = array();
+            
+            foreach ($order->get_items() as $item) {
+                $product = $item->get_product();
+                if (!$product) continue;
+                
+                // Get Tuma product ID from product meta (stored during sync)
+                $tuma_product_id = $product->get_meta('_tuma_product_id');
+                
+                // Fallback: try to find by SKU
+                if (empty($tuma_product_id)) {
+                    $sku = $product->get_sku();
+                    if (!empty($sku)) {
+                        // Try to get Tuma product ID by SKU
+                        $tuma_product_id = $this->get_tuma_product_id_by_sku($token, $sku);
+                        if ($tuma_product_id) {
+                            // Cache it for future use
+                            $product->update_meta_data('_tuma_product_id', $tuma_product_id);
+                            $product->save();
+                        }
+                    }
+                }
+                
+                if (empty($tuma_product_id)) {
+                    $missing_products[] = $product->get_name();
+                    continue;
+                }
+                
+                $items[] = array(
+                    'product_id' => $tuma_product_id,
+                    'quantity'   => $item->get_quantity(),
+                );
+            }
+            
+            // If no valid items, fall back to standard payment
+            if (empty($items)) {
+                error_log('Tuma POS: No products with Tuma IDs found. Products missing: ' . implode(', ', $missing_products));
+                wc_add_notice('Some products are not synced with POS. Please contact support or try again.', 'error');
+                return array('result' => 'fail');
+            }
+            
+            // Prepare sale payload
+            $sale_payload = array(
+                'items'          => $items,
+                'customer_name'  => $order->get_billing_first_name() . ' ' . $order->get_billing_last_name(),
+                'customer_email' => $order->get_billing_email(),
+                'customer_phone' => $phone,
+                'payment_method' => 'mpesa',
+                'callback_url'   => home_url('wc-api/tuma_pos_callback'),
+            );
+            
+            // Make sale request to Tuma POS
+            $response = wp_remote_post($this->api_base_url . '/sales', array(
+                'headers' => array(
+                    'Content-Type'  => 'application/json',
+                    'Authorization' => 'Bearer ' . $token,
+                ),
+                'body'    => json_encode($sale_payload),
+                'timeout' => 30,
+            ));
+            
+            if (is_wp_error($response)) {
+                error_log('Tuma POS Sale error: ' . $response->get_error_message());
+                wc_add_notice('Payment processing failed. Please try again.', 'error');
+                return array('result' => 'fail');
+            }
+            
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+            $status_code = wp_remote_retrieve_response_code($response);
+            
+            error_log('Tuma POS Sale response: ' . wp_remote_retrieve_body($response));
+            
+            if ($status_code === 200 || $status_code === 201) {
+                // Store sale details in order meta
+                if (!empty($body['data']['sale_id'])) {
+                    $order->update_meta_data('_tuma_sale_id', $body['data']['sale_id']);
+                }
+                if (!empty($body['data']['merchant_request_id'])) {
+                    $order->update_meta_data('_tuma_merchant_request_id', $body['data']['merchant_request_id']);
+                }
+                if (!empty($body['data']['checkout_request_id'])) {
+                    $order->update_meta_data('_tuma_checkout_request_id', $body['data']['checkout_request_id']);
+                }
+                $order->update_meta_data('_tuma_phone', $phone);
+                $order->update_meta_data('_tuma_pos_sync', 'yes');
+                $order->save();
+                
+                // Mark as pending payment
+                $order->update_status('pending', __('Awaiting M-Pesa payment confirmation (POS Sync).', 'woocommerce'));
+                
+                // Note: Stock will be managed by POS, so we don't reduce WC stock here
+                // unless product sync is also enabled
+                
+                // Remove cart
+                WC()->cart->empty_cart();
+                
+                return array(
+                    'result'   => 'success',
+                    'redirect' => $this->get_return_url($order),
+                );
+            } else {
+                $error_message = isset($body['message']) ? $body['message'] : 'POS sale creation failed';
+                error_log('Tuma POS Sale failed: ' . $error_message);
+                wc_add_notice($error_message, 'error');
+                return array('result' => 'fail');
+            }
+        }
+
+        /**
+         * Get Tuma product ID by SKU
+         */
+        private function get_tuma_product_id_by_sku($token, $sku) {
+            // Search for product by SKU in Tuma API
+            $response = wp_remote_get(
+                add_query_arg(array('sku' => $sku), $this->api_base_url . '/products'),
+                array(
+                    'headers' => array(
+                        'Authorization' => 'Bearer ' . $token,
+                    ),
+                    'timeout' => 30,
+                )
+            );
+            
+            if (is_wp_error($response)) {
+                return false;
+            }
+            
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+            
+            if (!empty($body['data']['products'])) {
+                foreach ($body['data']['products'] as $product) {
+                    if ($product['sku'] === $sku) {
+                        return $product['id'];
+                    }
+                }
+            }
+            
+            return false;
+        }
+
+        /**
+         * Handle POS sale callback from Tuma
+         */
+        public function pos_sale_callback() {
+            $payload = file_get_contents('php://input');
+            $data = json_decode($payload, true);
+            
+            error_log('Tuma POS callback received: ' . $payload);
+            
+            if (!$data || empty($data['sale_id'])) {
+                http_response_code(400);
+                exit(json_encode(array('success' => false, 'message' => 'Invalid payload')));
+            }
+            
+            // Find order by sale_id
+            $orders = wc_get_orders(array(
+                'meta_key'   => '_tuma_sale_id',
+                'meta_value' => $data['sale_id'],
+                'limit'      => 1,
+            ));
+            
+            // Fallback to merchant_request_id
+            if (empty($orders) && !empty($data['merchant_request_id'])) {
+                $orders = wc_get_orders(array(
+                    'meta_key'   => '_tuma_merchant_request_id',
+                    'meta_value' => $data['merchant_request_id'],
+                    'limit'      => 1,
+                ));
+            }
+            
+            if (empty($orders)) {
+                error_log('Tuma POS callback: Order not found for sale_id: ' . $data['sale_id']);
+                http_response_code(404);
+                exit(json_encode(array('success' => false, 'message' => 'Order not found')));
+            }
+            
+            $order = $orders[0];
+            
+            // Prevent processing if already completed
+            if (in_array($order->get_status(), array('completed', 'processing'))) {
+                http_response_code(200);
+                exit(json_encode(array('success' => true, 'message' => 'Already processed')));
+            }
+            
+            $result_code = isset($data['result_code']) ? intval($data['result_code']) : -1;
+            
+            if ($result_code === 0) {
+                // Payment successful
+                $receipt = isset($data['mpesa_receipt_number']) ? $data['mpesa_receipt_number'] : '';
+                $phone = $order->get_meta('_tuma_phone');
+                $old_status = $order->get_status();
+                
+                $order->set_transaction_id($receipt);
+                $order->payment_complete($receipt);
+                $order->update_status('completed', 'Payment completed via M-Pesa (POS Sync)');
+                
+                // Add comprehensive order note
+                $note = sprintf(
+                    'Full MPesa Payment Received (POS Sync) From %s. Receipt Number %s. Sale ID: %s. Order status changed from %s to Completed.',
+                    $phone,
+                    $receipt,
+                    $data['sale_id'],
+                    ucfirst(str_replace('-', ' ', $old_status))
+                );
+                $order->add_order_note($note);
+                
+                // Store additional callback data
+                if (!empty($data['checkout_request_id'])) {
+                    $order->update_meta_data('_tuma_checkout_request_id', $data['checkout_request_id']);
+                }
+                $order->update_meta_data('_tuma_mpesa_receipt', $receipt);
+                $order->save();
+                
+            } else {
+                // Payment failed
+                $failure_reason = isset($data['failure_reason']) ? $data['failure_reason'] : 
+                                  (isset($data['result_desc']) ? $data['result_desc'] : 'Payment failed');
+                
+                $order->set_transaction_id('fail');
+                $order->update_status('failed', 'M-Pesa payment failed (POS Sync): ' . $failure_reason);
+                $order->add_order_note(sprintf(
+                    'POS Sale payment failed. Sale ID: %s. Reason: %s. Result Code: %d',
+                    $data['sale_id'],
+                    $failure_reason,
+                    $result_code
+                ));
+                $order->save();
+            }
+            
+            http_response_code(200);
+            exit(json_encode(array('success' => true)));
+        }
         
         // Override thankyou page to show payment status - like original M-Pesa plugin
         public function thankyou_page($order_id) {
@@ -356,7 +638,7 @@ function init_tuma_payments_gateway() {
                 
                 // Payment instructions
                 echo '<div style="background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 5px; padding: 15px; margin: 20px 0;">';
-                echo '<h3 style="margin-top: 0; color: #28a745;"> Payment Instructions</h3>';
+                echo '<h3 style="margin-top: 0; color: #28a745;">Payment Instructions</h3>';
                 echo '<ol style="margin: 10px 0; padding-left: 20px;">';
                 echo '<li><strong>Check your phone:</strong> An M-Pesa STK push has been sent to <strong>' . esc_html($phone) . '</strong></li>';
                 echo '<li><strong>Confirm the amount:</strong> KSh ' . number_format($total, 2) . '</li>';
@@ -500,12 +782,19 @@ function init_tuma_payments_gateway() {
                         break;
                         
                     case 'failed':
-                        $reason = isset($data['message']) ? $data['message'] : 'Payment failed';
+                        $reason = isset($data['failure_reason']) ? $data['failure_reason'] : 
+                                  (isset($data['result_desc']) ? $data['result_desc'] : 'Payment failed');
+                        $order->set_transaction_id('fail');
                         $order->update_status('failed', 'M-Pesa payment failed: ' . $reason);
+                        $order->add_order_note('Payment failed: ' . $reason);
+                        $order->save();
                         break;
                         
                     case 'cancelled':
+                        $order->set_transaction_id('fail');
                         $order->update_status('cancelled', 'M-Pesa payment was cancelled by customer');
+                        $order->add_order_note('Payment cancelled by customer');
+                        $order->save();
                         break;
                         
                     case 'pending':
@@ -600,7 +889,14 @@ function init_tuma_payments_gateway() {
                 wp_send_json_error('Authentication failed');
             }
             
-            // Make STK push request
+            // Check if this is a POS sync order - resend via sales API
+            $is_pos_sync = $order->get_meta('_tuma_pos_sync') === 'yes';
+            if ($is_pos_sync) {
+                $this->resend_pos_sale_request($order, $phone, $token);
+                return;
+            }
+            
+            // Standard payment - Make STK push request
             $payment_data = array(
                 'amount' => $total,
                 'phone' => $phone,
@@ -624,6 +920,87 @@ function init_tuma_payments_gateway() {
                 wp_send_json_success($response['data']);
             } else {
                 $error_message = isset($response['message']) ? $response['message'] : 'Payment request failed';
+                wp_send_json_error($error_message);
+            }
+        }
+        
+        // Resend POS sale payment request
+        private function resend_pos_sale_request($order, $phone, $token) {
+            // Build items array with Tuma product IDs
+            $items = array();
+            
+            foreach ($order->get_items() as $item) {
+                $product = $item->get_product();
+                if (!$product) continue;
+                
+                $tuma_product_id = $product->get_meta('_tuma_product_id');
+                
+                if (empty($tuma_product_id)) {
+                    $sku = $product->get_sku();
+                    if (!empty($sku)) {
+                        $tuma_product_id = $this->get_tuma_product_id_by_sku($token, $sku);
+                    }
+                }
+                
+                if (empty($tuma_product_id)) continue;
+                
+                $items[] = array(
+                    'product_id' => $tuma_product_id,
+                    'quantity'   => $item->get_quantity(),
+                );
+            }
+            
+            if (empty($items)) {
+                wp_send_json_error('No valid products found for POS sync');
+                return;
+            }
+            
+            // Prepare sale payload
+            $sale_payload = array(
+                'items'          => $items,
+                'customer_name'  => $order->get_billing_first_name() . ' ' . $order->get_billing_last_name(),
+                'customer_email' => $order->get_billing_email(),
+                'customer_phone' => $phone,
+                'payment_method' => 'mpesa',
+                'callback_url'   => home_url('wc-api/tuma_pos_callback'),
+            );
+            
+            $response = wp_remote_post($this->api_base_url . '/sales', array(
+                'headers' => array(
+                    'Content-Type'  => 'application/json',
+                    'Authorization' => 'Bearer ' . $token,
+                ),
+                'body'    => json_encode($sale_payload),
+                'timeout' => 30,
+            ));
+            
+            if (is_wp_error($response)) {
+                wp_send_json_error('Failed to resend payment request');
+                return;
+            }
+            
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+            $status_code = wp_remote_retrieve_response_code($response);
+            
+            if ($status_code === 200 || $status_code === 201) {
+                if (!empty($body['data']['sale_id'])) {
+                    $order->update_meta_data('_tuma_sale_id', $body['data']['sale_id']);
+                }
+                if (!empty($body['data']['merchant_request_id'])) {
+                    $order->update_meta_data('_tuma_merchant_request_id', $body['data']['merchant_request_id']);
+                }
+                if (!empty($body['data']['checkout_request_id'])) {
+                    $order->update_meta_data('_tuma_checkout_request_id', $body['data']['checkout_request_id']);
+                }
+                $order->save();
+                
+                $order->add_order_note(
+                    sprintf(__('Tuma POS sale resent to %s. Sale ID: %s'), $phone, $body['data']['sale_id'] ?? 'N/A')
+                );
+                
+                wp_send_json_success($body['data'] ?? array());
+            } else {
+                $error_message = isset($body['message']) ? $body['message'] : 'POS sale request failed';
                 wp_send_json_error($error_message);
             }
         }
@@ -697,6 +1074,75 @@ function init_tuma_payments_gateway() {
                         },
                         complete: function() {
                             button.prop('disabled', false).text('Test Connection');
+                        }
+                    });
+                });
+            });
+            </script>
+            <?php
+            return ob_get_clean();
+        }
+
+        public function generate_tuma_sync_products_button_html($key, $data) {
+            $field_key = $this->get_field_key($key);
+            $defaults  = array(
+                'title'             => '',
+                'disabled'          => false,
+                'class'             => '',
+                'css'               => '',
+                'placeholder'       => '',
+                'type'              => 'text',
+                'desc_tip'          => false,
+                'description'       => '',
+                'custom_attributes' => array(),
+            );
+
+            $data = wp_parse_args($data, $defaults);
+
+            ob_start();
+            ?>
+            <tr valign="top">
+                <th scope="row" class="titledesc">
+                    <label for="<?php echo esc_attr($field_key); ?>"><?php echo wp_kses_post($data['title']); ?></label>
+                </th>
+                <td class="forminp">
+                    <div id="tuma-sync-products-status">
+                        <button type="button" id="sync-tuma-products" class="button-secondary">Sync Products Now</button>
+                        <div id="tuma-sync-result" style="margin-top: 10px;"></div>
+                    </div>
+                    <?php if (!empty($data['description'])) : ?>
+                        <p class="description"><?php echo wp_kses_post($data['description']); ?></p>
+                    <?php endif; ?>
+                </td>
+            </tr>
+            <script type="text/javascript">
+            jQuery(document).ready(function($) {
+                $('#sync-tuma-products').on('click', function() {
+                    var button = $(this);
+                    var result = $('#tuma-sync-result');
+
+                    button.prop('disabled', true).text('Syncing...');
+                    result.html('<div style="color: #666;">Syncing products from Tuma POS... This may take a few minutes.</div>');
+
+                    $.ajax({
+                        url: ajaxurl,
+                        type: 'POST',
+                        data: {
+                            action: 'tuma_sync_products',
+                            nonce: '<?php echo wp_create_nonce('tuma_sync_products'); ?>'
+                        },
+                        success: function(response) {
+                            if (response.success) {
+                                result.html('<div style="color: green; padding: 10px; background: #f0f8f0; border: 1px solid #4CAF50; border-radius: 4px;"><strong>✓ Sync Completed!</strong><br>Products synced: ' + response.data.synced + '<br>Products updated: ' + response.data.updated + '<br>Products created: ' + response.data.created + '</div>');
+                            } else {
+                                result.html('<div style="color: red; padding: 10px; background: #fff0f0; border: 1px solid #f44336; border-radius: 4px;"><strong>✗ Sync Failed</strong><br>' + response.data.message + '</div>');
+                            }
+                        },
+                        error: function() {
+                            result.html('<div style="color: red;">Sync failed. Please try again.</div>');
+                        },
+                        complete: function() {
+                            button.prop('disabled', false).text('Sync Products Now');
                         }
                     });
                 });
@@ -920,5 +1366,318 @@ function handle_tuma_test_connection() {
         wp_send_json_error(array('message' => 'IPRS verification required. Please complete identity verification in your merchant portal.'));
     } else {
         wp_send_json_error(array('message' => isset($body['message']) ? $body['message'] : 'Invalid credentials'));
+    }
+}
+
+// ============================================================================
+// PRODUCT SYNC FUNCTIONALITY
+// ============================================================================
+
+// AJAX handler for manual product sync
+add_action('wp_ajax_tuma_sync_products', 'handle_tuma_sync_products');
+
+function handle_tuma_sync_products() {
+    // Verify nonce for security
+    if (!wp_verify_nonce($_POST['nonce'], 'tuma_sync_products')) {
+        wp_die('Security check failed');
+    }
+    
+    // Check user capabilities
+    if (!current_user_can('manage_woocommerce')) {
+        wp_send_json_error(array('message' => 'Permission denied'));
+    }
+    
+    $result = tuma_sync_products_from_pos();
+    
+    if ($result['success']) {
+        wp_send_json_success($result);
+    } else {
+        wp_send_json_error($result);
+    }
+}
+
+// Schedule hourly sync if enabled
+register_activation_hook(__FILE__, 'tuma_schedule_product_sync');
+function tuma_schedule_product_sync() {
+    if (!wp_next_scheduled('tuma_hourly_product_sync_event')) {
+        wp_schedule_event(time(), 'hourly', 'tuma_hourly_product_sync_event');
+    }
+}
+
+register_deactivation_hook(__FILE__, 'tuma_clear_product_sync_schedule');
+function tuma_clear_product_sync_schedule() {
+    wp_clear_scheduled_hook('tuma_hourly_product_sync_event');
+}
+
+add_action('tuma_hourly_product_sync_event', 'tuma_scheduled_product_sync');
+function tuma_scheduled_product_sync() {
+    $settings = get_option('woocommerce_tuma_payments_settings', array());
+    
+    // Only sync if product sync is enabled
+    if (isset($settings['enable_product_sync']) && $settings['enable_product_sync'] === 'yes') {
+        tuma_sync_products_from_pos();
+    }
+}
+
+/**
+ * Get Tuma API token using gateway settings
+ */
+function tuma_get_api_token() {
+    $settings = get_option('woocommerce_tuma_payments_settings', array());
+    
+    $email = isset($settings['api_email']) ? $settings['api_email'] : '';
+    $api_key = isset($settings['api_key']) ? $settings['api_key'] : '';
+    
+    if (empty($email) || empty($api_key)) {
+        return false;
+    }
+    
+    // Check for cached token
+    $token = get_transient('tuma_api_token');
+    if ($token) {
+        return $token;
+    }
+    
+    $response = wp_remote_post('https://api.tuma.co.ke/auth/token', array(
+        'body' => json_encode(array(
+            'email'   => $email,
+            'api_key' => $api_key
+        )),
+        'headers' => array('Content-Type' => 'application/json'),
+        'timeout' => 20,
+    ));
+    
+    if (is_wp_error($response)) {
+        error_log('Tuma API auth error: ' . $response->get_error_message());
+        return false;
+    }
+    
+    $data = json_decode(wp_remote_retrieve_body($response), true);
+    
+    if (!empty($data['data']['token'])) {
+        set_transient('tuma_api_token', $data['data']['token'], 3500);
+        return $data['data']['token'];
+    }
+    
+    return false;
+}
+
+/**
+ * Sync products from Tuma POS to WooCommerce
+ */
+function tuma_sync_products_from_pos() {
+    $token = tuma_get_api_token();
+    
+    if (!$token) {
+        return array(
+            'success' => false,
+            'message' => 'Failed to authenticate with Tuma API. Check your credentials.'
+        );
+    }
+    
+    $page = 1;
+    $has_next = true;
+    $synced = 0;
+    $created = 0;
+    $updated = 0;
+    $errors = array();
+    
+    while ($has_next) {
+        $response = wp_remote_get(
+            add_query_arg(array('page' => $page, 'limit' => 100), 'https://api.tuma.co.ke/products'),
+            array(
+                'headers' => array(
+                    'Authorization' => 'Bearer ' . $token,
+                ),
+                'timeout' => 45,
+            )
+        );
+        
+        if (is_wp_error($response)) {
+            $errors[] = 'API request failed: ' . $response->get_error_message();
+            break;
+        }
+        
+        $results = json_decode(wp_remote_retrieve_body($response), true);
+        
+        if (empty($results['data']['products'])) {
+            break;
+        }
+        
+        foreach ($results['data']['products'] as $item) {
+            try {
+                // Skip inactive products
+                if (isset($item['is_active']) && !$item['is_active']) {
+                    continue;
+                }
+                
+                // Find existing product by SKU
+                $product_id = wc_get_product_id_by_sku($item['sku']);
+                $is_new = false;
+                
+                if ($product_id) {
+                    $product = wc_get_product($product_id);
+                    $updated++;
+                } else {
+                    $product = new WC_Product_Simple();
+                    $product->set_sku($item['sku']);
+                    $is_new = true;
+                    $created++;
+                }
+                
+                // Update product data
+                $product->set_name($item['name']);
+                $product->set_regular_price($item['price']);
+                
+                if (!empty($item['description'])) {
+                    $product->set_description($item['description']);
+                }
+                
+                $product->set_manage_stock(true);
+                $product->set_stock_quantity($item['stock']);
+                $product->set_stock_status($item['stock'] > 0 ? 'instock' : 'outofstock');
+                $product->set_status('publish');
+                
+                // Store Tuma product ID for POS sync
+                $product->update_meta_data('_tuma_product_id', $item['id']);
+                $product->update_meta_data('_tuma_last_sync', current_time('mysql'));
+                
+                $saved_id = $product->save();
+                
+                // Download and set product image if available
+                if (!empty($item['image_url']) && $saved_id) {
+                    $image_id = tuma_download_product_image($item['image_url'], $item['name']);
+                    if ($image_id) {
+                        set_post_thumbnail($saved_id, $image_id);
+                    }
+                }
+                
+                $synced++;
+                
+            } catch (Exception $e) {
+                $errors[] = 'Error syncing product ' . $item['sku'] . ': ' . $e->getMessage();
+                error_log('Tuma product sync error: ' . $e->getMessage());
+            }
+        }
+        
+        $has_next = isset($results['data']['pagination']['has_next']) ? $results['data']['pagination']['has_next'] : false;
+        $page++;
+        
+        // Prevent timeout on large catalogs
+        if ($page > 20) {
+            break;
+        }
+    }
+    
+    // Log sync completion
+    error_log(sprintf('Tuma product sync completed: %d synced, %d created, %d updated', $synced, $created, $updated));
+    
+    return array(
+        'success' => true,
+        'synced'  => $synced,
+        'created' => $created,
+        'updated' => $updated,
+        'errors'  => $errors,
+    );
+}
+
+/**
+ * Download and save product image
+ */
+function tuma_download_product_image($url, $name) {
+    require_once(ABSPATH . 'wp-admin/includes/media.php');
+    require_once(ABSPATH . 'wp-admin/includes/file.php');
+    require_once(ABSPATH . 'wp-admin/includes/image.php');
+    
+    // Fix relative URLs
+    if (!preg_match('/^https?:\/\//', $url)) {
+        $url = 'https://api.tuma.co.ke' . $url;
+    }
+    
+    // Check for existing image
+    global $wpdb;
+    $existing_id = $wpdb->get_var($wpdb->prepare("
+        SELECT post_id FROM $wpdb->postmeta
+        WHERE meta_key = '_tuma_image_url'
+        AND meta_value = %s
+        LIMIT 1
+    ", $url));
+    
+    if ($existing_id) {
+        return intval($existing_id);
+    }
+    
+    // Fetch image
+    $response = wp_remote_get($url, array(
+        'timeout' => 30,
+        'headers' => array('User-Agent' => 'Mozilla/5.0'),
+    ));
+    
+    if (is_wp_error($response)) {
+        error_log('Tuma image download failed: ' . $response->get_error_message());
+        return false;
+    }
+    
+    $body = wp_remote_retrieve_body($response);
+    
+    // Detect invalid response (HTML instead of image)
+    if (strpos($body, '<html') !== false || empty($body)) {
+        return false;
+    }
+    
+    $tmp = wp_tempnam($url);
+    file_put_contents($tmp, $body);
+    
+    // Handle filename
+    $decoded_url = urldecode($url);
+    $path = parse_url($decoded_url, PHP_URL_PATH);
+    $filename = basename($path);
+    
+    if (!$filename || strpos($filename, '.') === false) {
+        $filename = sanitize_title($name) . '.jpg';
+    }
+    
+    $file_array = array(
+        'name'     => sanitize_file_name($filename),
+        'tmp_name' => $tmp
+    );
+    
+    $id = media_handle_sideload($file_array, 0);
+    
+    if (is_wp_error($id)) {
+        error_log('Tuma media upload failed: ' . $id->get_error_message());
+        @unlink($tmp);
+        return false;
+    }
+    
+    update_post_meta($id, '_tuma_image_url', $url);
+    
+    return $id;
+}
+
+// Add POS sync status column to products list
+add_filter('manage_edit-product_columns', 'tuma_add_product_sync_column');
+function tuma_add_product_sync_column($columns) {
+    $columns['tuma_sync'] = 'POS Sync';
+    return $columns;
+}
+
+add_action('manage_product_posts_custom_column', 'tuma_product_sync_column_content', 10, 2);
+function tuma_product_sync_column_content($column, $post_id) {
+    if ($column === 'tuma_sync') {
+        $product = wc_get_product($post_id);
+        if ($product) {
+            $tuma_id = $product->get_meta('_tuma_product_id');
+            $last_sync = $product->get_meta('_tuma_last_sync');
+            
+            if ($tuma_id) {
+                echo '<span style="color: green;">✓ Synced</span>';
+                if ($last_sync) {
+                    echo '<br><small>' . esc_html($last_sync) . '</small>';
+                }
+            } else {
+                echo '<span style="color: #999;">Not synced</span>';
+            }
+        }
     }
 }

@@ -3,13 +3,13 @@
 /**
  * @package Tuma Payments for WooCommerce
  * @author Tuma Payments < support@tuma.co.ke >
- * @version 1.2.0
+ * @version 1.3.0
  *
  * Plugin Name: Tuma Payments for WooCommerce
  * Plugin URI: https://merchant.tuma.co.ke/
- * Description: This plugin extends WordPress and WooCommerce functionality to integrate your online shop with bank accounts to accept and process online payments via M-Pesa.
+ * Description: This plugin extends WordPress and WooCommerce functionality to integrate your online shop with bank accounts to accept and process online payments via M-Pesa. Supports product variations sync with Tuma POS.
  * Author: Shadrack Matata < support@tuma.co.ke >
- * Version: 1.2.0
+ * Version: 1.3.0
  * Author URI: https://twitter.com/shadrac_matata/
  *
  * Requires at least: 6.7
@@ -28,7 +28,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TUMA_WC_VER', '1.2.0');
+define('TUMA_WC_VER', '1.3.0');
 if (!defined('TUMA_WC_PLUGIN_FILE')) {
     define('TUMA_WC_PLUGIN_FILE', __FILE__);
 }
@@ -385,7 +385,7 @@ function init_tuma_payments_gateway() {
         private function process_pos_sale_payment($order, $phone, $token) {
             $order_id = $order->get_id();
             
-            // Build items array with Tuma product IDs
+            // Build items array with Tuma product IDs (supporting variations)
             $items = array();
             $missing_products = array();
             
@@ -393,19 +393,58 @@ function init_tuma_payments_gateway() {
                 $product = $item->get_product();
                 if (!$product) continue;
                 
-                // Get Tuma product ID from product meta (stored during sync)
-                $tuma_product_id = $product->get_meta('_tuma_product_id');
+                $tuma_product_id = null;
+                $tuma_variant_id = null;
                 
-                // Fallback: try to find by SKU
-                if (empty($tuma_product_id)) {
-                    $sku = $product->get_sku();
-                    if (!empty($sku)) {
-                        // Try to get Tuma product ID by SKU
-                        $tuma_product_id = $this->get_tuma_product_id_by_sku($token, $sku);
-                        if ($tuma_product_id) {
-                            // Cache it for future use
-                            $product->update_meta_data('_tuma_product_id', $tuma_product_id);
-                            $product->save();
+                // Check if this is a variation
+                if ($product->is_type('variation')) {
+                    // Get the parent product's Tuma ID
+                    $parent_id = $product->get_parent_id();
+                    $parent_product = wc_get_product($parent_id);
+                    
+                    if ($parent_product) {
+                        $tuma_product_id = $parent_product->get_meta('_tuma_product_id');
+                        
+                        // Fallback: try to find parent by SKU
+                        if (empty($tuma_product_id)) {
+                            $parent_sku = $parent_product->get_sku();
+                            if (!empty($parent_sku)) {
+                                $tuma_product_id = $this->get_tuma_product_id_by_sku($token, $parent_sku);
+                                if ($tuma_product_id) {
+                                    $parent_product->update_meta_data('_tuma_product_id', $tuma_product_id);
+                                    $parent_product->save();
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Get the variant's Tuma ID
+                    $tuma_variant_id = $product->get_meta('_tuma_variant_id');
+                    
+                    // Fallback: try to find variant by SKU
+                    if (empty($tuma_variant_id) && !empty($tuma_product_id)) {
+                        $variant_sku = $product->get_sku();
+                        if (!empty($variant_sku)) {
+                            $tuma_variant_id = $this->get_tuma_variant_id_by_sku($token, $tuma_product_id, $variant_sku);
+                            if ($tuma_variant_id) {
+                                $product->update_meta_data('_tuma_variant_id', $tuma_variant_id);
+                                $product->save();
+                            }
+                        }
+                    }
+                } else {
+                    // Simple product
+                    $tuma_product_id = $product->get_meta('_tuma_product_id');
+                    
+                    // Fallback: try to find by SKU
+                    if (empty($tuma_product_id)) {
+                        $sku = $product->get_sku();
+                        if (!empty($sku)) {
+                            $tuma_product_id = $this->get_tuma_product_id_by_sku($token, $sku);
+                            if ($tuma_product_id) {
+                                $product->update_meta_data('_tuma_product_id', $tuma_product_id);
+                                $product->save();
+                            }
                         }
                     }
                 }
@@ -415,10 +454,17 @@ function init_tuma_payments_gateway() {
                     continue;
                 }
                 
-                $items[] = array(
+                $sale_item = array(
                     'product_id' => $tuma_product_id,
                     'quantity'   => $item->get_quantity(),
                 );
+                
+                // Add variant ID if this is a variation
+                if (!empty($tuma_variant_id)) {
+                    $sale_item['product_variant_id'] = $tuma_variant_id;
+                }
+                
+                $items[] = $sale_item;
             }
             
             // If no valid items, fall back to standard payment
@@ -501,7 +547,7 @@ function init_tuma_payments_gateway() {
         private function get_tuma_product_id_by_sku($token, $sku) {
             // Search for product by SKU in Tuma API
             $response = wp_remote_get(
-                add_query_arg(array('sku' => $sku), $this->api_base_url . '/products'),
+                add_query_arg(array('search' => $sku), $this->api_base_url . '/products'),
                 array(
                     'headers' => array(
                         'Authorization' => 'Bearer ' . $token,
@@ -520,6 +566,38 @@ function init_tuma_payments_gateway() {
                 foreach ($body['data']['products'] as $product) {
                     if ($product['sku'] === $sku) {
                         return $product['id'];
+                    }
+                }
+            }
+            
+            return false;
+        }
+        
+        /**
+         * Get Tuma variant ID by SKU
+         */
+        private function get_tuma_variant_id_by_sku($token, $product_id, $variant_sku) {
+            // Get product details which includes variants
+            $response = wp_remote_get(
+                $this->api_base_url . '/products/' . $product_id,
+                array(
+                    'headers' => array(
+                        'Authorization' => 'Bearer ' . $token,
+                    ),
+                    'timeout' => 30,
+                )
+            );
+            
+            if (is_wp_error($response)) {
+                return false;
+            }
+            
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+            
+            if (!empty($body['data']['product']['variants'])) {
+                foreach ($body['data']['product']['variants'] as $variant) {
+                    if ($variant['sku'] === $variant_sku) {
+                        return $variant['id'];
                     }
                 }
             }
@@ -926,28 +1004,63 @@ function init_tuma_payments_gateway() {
         
         // Resend POS sale payment request
         private function resend_pos_sale_request($order, $phone, $token) {
-            // Build items array with Tuma product IDs
+            // Build items array with Tuma product IDs (supporting variations)
             $items = array();
             
             foreach ($order->get_items() as $item) {
                 $product = $item->get_product();
                 if (!$product) continue;
                 
-                $tuma_product_id = $product->get_meta('_tuma_product_id');
+                $tuma_product_id = null;
+                $tuma_variant_id = null;
                 
-                if (empty($tuma_product_id)) {
-                    $sku = $product->get_sku();
-                    if (!empty($sku)) {
-                        $tuma_product_id = $this->get_tuma_product_id_by_sku($token, $sku);
+                // Check if this is a variation
+                if ($product->is_type('variation')) {
+                    $parent_id = $product->get_parent_id();
+                    $parent_product = wc_get_product($parent_id);
+                    
+                    if ($parent_product) {
+                        $tuma_product_id = $parent_product->get_meta('_tuma_product_id');
+                        
+                        if (empty($tuma_product_id)) {
+                            $parent_sku = $parent_product->get_sku();
+                            if (!empty($parent_sku)) {
+                                $tuma_product_id = $this->get_tuma_product_id_by_sku($token, $parent_sku);
+                            }
+                        }
+                    }
+                    
+                    $tuma_variant_id = $product->get_meta('_tuma_variant_id');
+                    
+                    if (empty($tuma_variant_id) && !empty($tuma_product_id)) {
+                        $variant_sku = $product->get_sku();
+                        if (!empty($variant_sku)) {
+                            $tuma_variant_id = $this->get_tuma_variant_id_by_sku($token, $tuma_product_id, $variant_sku);
+                        }
+                    }
+                } else {
+                    $tuma_product_id = $product->get_meta('_tuma_product_id');
+                    
+                    if (empty($tuma_product_id)) {
+                        $sku = $product->get_sku();
+                        if (!empty($sku)) {
+                            $tuma_product_id = $this->get_tuma_product_id_by_sku($token, $sku);
+                        }
                     }
                 }
                 
                 if (empty($tuma_product_id)) continue;
                 
-                $items[] = array(
+                $sale_item = array(
                     'product_id' => $tuma_product_id,
                     'quantity'   => $item->get_quantity(),
                 );
+                
+                if (!empty($tuma_variant_id)) {
+                    $sale_item['product_variant_id'] = $tuma_variant_id;
+                }
+                
+                $items[] = $sale_item;
             }
             
             if (empty($items)) {
@@ -1511,51 +1624,69 @@ function tuma_sync_products_from_pos() {
                     continue;
                 }
                 
-                // Find existing product by SKU
-                $product_id = wc_get_product_id_by_sku($item['sku']);
-                $is_new = false;
+                // Check if product has variants
+                $has_variants = !empty($item['has_variants']) && !empty($item['variants']);
                 
-                if ($product_id) {
-                    $product = wc_get_product($product_id);
-                    $updated++;
-                } else {
-                    $product = new WC_Product_Simple();
-                    $product->set_sku($item['sku']);
-                    $is_new = true;
-                    $created++;
-                }
-                
-                // Update product data
-                $product->set_name($item['name']);
-                $product->set_regular_price($item['price']);
-                
-                if (!empty($item['description'])) {
-                    $product->set_description($item['description']);
-                }
-                
-                $product->set_manage_stock(true);
-                $product->set_stock_quantity($item['stock']);
-                $product->set_stock_status($item['stock'] > 0 ? 'instock' : 'outofstock');
-                $product->set_status('publish');
-                
-                // Store Tuma product ID for POS sync
-                $product->update_meta_data('_tuma_product_id', $item['id']);
-                $product->update_meta_data('_tuma_last_sync', current_time('mysql'));
-                
-                $saved_id = $product->save();
-                
-                // Download and set product image if available
-                if (!empty($item['image_url']) && $saved_id) {
-                    $image_id = tuma_download_product_image($item['image_url'], $item['name']);
-                    if ($image_id) {
-                        set_post_thumbnail($saved_id, $image_id);
+                if ($has_variants) {
+                    // Handle variable product
+                    $sync_result = tuma_sync_variable_product($item, $token);
+                    if ($sync_result['success']) {
+                        if ($sync_result['is_new']) {
+                            $created++;
+                        } else {
+                            $updated++;
+                        }
+                        $synced++;
+                    } else {
+                        $errors[] = $sync_result['error'];
                     }
+                } else {
+                    // Handle simple product
+                    $product_id = wc_get_product_id_by_sku($item['sku']);
+                    $is_new = false;
+                    
+                    if ($product_id) {
+                        $product = wc_get_product($product_id);
+                        $updated++;
+                    } else {
+                        $product = new WC_Product_Simple();
+                        $product->set_sku($item['sku']);
+                        $is_new = true;
+                        $created++;
+                    }
+                    
+                    // Update product data
+                    $product->set_name($item['name']);
+                    $product->set_regular_price($item['price']);
+                    
+                    if (!empty($item['description'])) {
+                        $product->set_description($item['description']);
+                    }
+                    
+                    $product->set_manage_stock(true);
+                    $product->set_stock_quantity($item['stock']);
+                    $product->set_stock_status($item['stock'] > 0 ? 'instock' : 'outofstock');
+                    $product->set_status('publish');
+                    
+                    // Store Tuma product ID for POS sync
+                    $product->update_meta_data('_tuma_product_id', $item['id']);
+                    $product->update_meta_data('_tuma_last_sync', current_time('mysql'));
+                    
+                    $saved_id = $product->save();
+                    
+                    // Download and set product image if available
+                    if (!empty($item['image_url']) && $saved_id) {
+                        $image_id = tuma_download_product_image($item['image_url'], $item['name']);
+                        if ($image_id) {
+                            set_post_thumbnail($saved_id, $image_id);
+                        }
+                    }
+                    
+                    $synced++;
                 }
-                
-                $synced++;
                 
             } catch (Exception $e) {
-                $errors[] = 'Error syncing product ' . $item['sku'] . ': ' . $e->getMessage();
+                $errors[] = 'Error syncing product ' . ($item['sku'] ?? $item['name']) . ': ' . $e->getMessage();
                 error_log('Tuma product sync error: ' . $e->getMessage());
             }
         }
@@ -1579,6 +1710,211 @@ function tuma_sync_products_from_pos() {
         'updated' => $updated,
         'errors'  => $errors,
     );
+}
+
+/**
+ * Sync a variable product with variants from Tuma POS to WooCommerce
+ */
+function tuma_sync_variable_product($item, $token) {
+    try {
+        // Find existing product by SKU or Tuma ID
+        $product_id = null;
+        
+        if (!empty($item['sku'])) {
+            $product_id = wc_get_product_id_by_sku($item['sku']);
+        }
+        
+        // Also check by Tuma product ID
+        if (!$product_id) {
+            global $wpdb;
+            $product_id = $wpdb->get_var($wpdb->prepare("
+                SELECT post_id FROM $wpdb->postmeta
+                WHERE meta_key = '_tuma_product_id'
+                AND meta_value = %s
+                LIMIT 1
+            ", $item['id']));
+        }
+        
+        $is_new = false;
+        
+        if ($product_id) {
+            $product = wc_get_product($product_id);
+            // If existing product is simple, we need to convert it to variable
+            if ($product && !$product->is_type('variable')) {
+                // Delete the simple product and create variable
+                wp_delete_post($product_id, true);
+                $product = new WC_Product_Variable();
+                $is_new = true;
+            } elseif (!$product) {
+                $product = new WC_Product_Variable();
+                $is_new = true;
+            }
+        } else {
+            $product = new WC_Product_Variable();
+            $is_new = true;
+        }
+        
+        // Set basic product data
+        $product->set_name($item['name']);
+        if (!empty($item['sku'])) {
+            $product->set_sku($item['sku']);
+        }
+        if (!empty($item['description'])) {
+            $product->set_description($item['description']);
+        }
+        $product->set_status('publish');
+        $product->set_catalog_visibility('visible');
+        
+        // Store Tuma product ID
+        $product->update_meta_data('_tuma_product_id', $item['id']);
+        $product->update_meta_data('_tuma_last_sync', current_time('mysql'));
+        $product->update_meta_data('_tuma_has_variants', 'yes');
+        
+        // Save the parent product first
+        $parent_id = $product->save();
+        
+        // Parse variation details to create attributes
+        $attributes = array();
+        $variation_data = array();
+        
+        foreach ($item['variants'] as $variant) {
+            // Parse variation_details string like "Color:Red, Size:Large"
+            $variant_attributes = array();
+            if (!empty($variant['variation_details'])) {
+                $details = explode(', ', $variant['variation_details']);
+                foreach ($details as $detail) {
+                    $parts = explode(':', $detail, 2);
+                    if (count($parts) === 2) {
+                        $attr_name = trim($parts[0]);
+                        $attr_value = trim($parts[1]);
+                        
+                        // Build attributes array
+                        if (!isset($attributes[$attr_name])) {
+                            $attributes[$attr_name] = array();
+                        }
+                        if (!in_array($attr_value, $attributes[$attr_name])) {
+                            $attributes[$attr_name][] = $attr_value;
+                        }
+                        
+                        $variant_attributes[$attr_name] = $attr_value;
+                    }
+                }
+            }
+            
+            $variation_data[] = array(
+                'tuma_variant_id' => $variant['id'],
+                'sku' => $variant['sku'] ?? '',
+                'price' => $variant['price'] ?? $item['price'],
+                'stock' => $variant['stock'] ?? 0,
+                'attributes' => $variant_attributes,
+            );
+        }
+        
+        // Create/update product attributes
+        $product_attributes = array();
+        $position = 0;
+        
+        foreach ($attributes as $attr_name => $attr_values) {
+            $attribute = new WC_Product_Attribute();
+            $attribute->set_name($attr_name);
+            $attribute->set_options($attr_values);
+            $attribute->set_position($position);
+            $attribute->set_visible(true);
+            $attribute->set_variation(true);
+            
+            $product_attributes[] = $attribute;
+            $position++;
+        }
+        
+        $product->set_attributes($product_attributes);
+        $product->save();
+        
+        // Get existing variations
+        $existing_variations = $product->get_children();
+        $processed_variation_ids = array();
+        
+        // Create/update variations
+        foreach ($variation_data as $var_data) {
+            $variation_id = null;
+            
+            // Try to find existing variation by SKU
+            if (!empty($var_data['sku'])) {
+                $variation_id = wc_get_product_id_by_sku($var_data['sku']);
+            }
+            
+            // Or by Tuma variant ID
+            if (!$variation_id) {
+                global $wpdb;
+                $variation_id = $wpdb->get_var($wpdb->prepare("
+                    SELECT post_id FROM $wpdb->postmeta
+                    WHERE meta_key = '_tuma_variant_id'
+                    AND meta_value = %s
+                    LIMIT 1
+                ", $var_data['tuma_variant_id']));
+            }
+            
+            if ($variation_id && in_array($variation_id, $existing_variations)) {
+                $variation = wc_get_product($variation_id);
+            } else {
+                $variation = new WC_Product_Variation();
+                $variation->set_parent_id($parent_id);
+            }
+            
+            if (!empty($var_data['sku'])) {
+                $variation->set_sku($var_data['sku']);
+            }
+            $variation->set_regular_price($var_data['price']);
+            $variation->set_manage_stock(true);
+            $variation->set_stock_quantity($var_data['stock']);
+            $variation->set_stock_status($var_data['stock'] > 0 ? 'instock' : 'outofstock');
+            $variation->set_status('publish');
+            
+            // Set variation attributes
+            $var_attributes = array();
+            foreach ($var_data['attributes'] as $attr_name => $attr_value) {
+                $var_attributes[sanitize_title($attr_name)] = $attr_value;
+            }
+            $variation->set_attributes($var_attributes);
+            
+            // Store Tuma variant ID
+            $variation->update_meta_data('_tuma_variant_id', $var_data['tuma_variant_id']);
+            $variation->update_meta_data('_tuma_last_sync', current_time('mysql'));
+            
+            $saved_var_id = $variation->save();
+            $processed_variation_ids[] = $saved_var_id;
+        }
+        
+        // Delete variations that no longer exist in Tuma
+        foreach ($existing_variations as $existing_var_id) {
+            if (!in_array($existing_var_id, $processed_variation_ids)) {
+                wp_delete_post($existing_var_id, true);
+            }
+        }
+        
+        // Sync data store to update variation data
+        WC_Product_Variable::sync($parent_id);
+        
+        // Download and set product image if available
+        if (!empty($item['image_url'])) {
+            $image_id = tuma_download_product_image($item['image_url'], $item['name']);
+            if ($image_id) {
+                set_post_thumbnail($parent_id, $image_id);
+            }
+        }
+        
+        return array(
+            'success' => true,
+            'is_new' => $is_new,
+            'product_id' => $parent_id,
+        );
+        
+    } catch (Exception $e) {
+        error_log('Tuma variable product sync error: ' . $e->getMessage());
+        return array(
+            'success' => false,
+            'error' => 'Error syncing variable product ' . $item['name'] . ': ' . $e->getMessage(),
+        );
+    }
 }
 
 /**
@@ -1669,14 +2005,28 @@ function tuma_product_sync_column_content($column, $post_id) {
         if ($product) {
             $tuma_id = $product->get_meta('_tuma_product_id');
             $last_sync = $product->get_meta('_tuma_last_sync');
+            $has_variants = $product->get_meta('_tuma_has_variants');
             
             if ($tuma_id) {
                 echo '<span style="color: green;">✓ Synced</span>';
+                if ($has_variants === 'yes') {
+                    echo '<br><small style="color: #0073aa;">Variable Product</small>';
+                }
                 if ($last_sync) {
                     echo '<br><small>' . esc_html($last_sync) . '</small>';
                 }
             } else {
-                echo '<span style="color: #999;">Not synced</span>';
+                // Check if this is a variation
+                if ($product->is_type('variation')) {
+                    $tuma_variant_id = $product->get_meta('_tuma_variant_id');
+                    if ($tuma_variant_id) {
+                        echo '<span style="color: green;">✓ Variant</span>';
+                    } else {
+                        echo '<span style="color: #999;">Not synced</span>';
+                    }
+                } else {
+                    echo '<span style="color: #999;">Not synced</span>';
+                }
             }
         }
     }

@@ -71,6 +71,8 @@ If you use Tuma POS for your physical store, you can enable inventory and sales 
    - SKU mapping for inventory tracking
    - Product images (if available)
    - Stock quantities
+   - **Variable products** with all their variations (color, size, etc.)
+   - Individual variant pricing and stock levels
 
 2. **Sales Sync**: When a customer places an order:
    - The sale is sent to your Tuma POS
@@ -116,10 +118,19 @@ Get instant Payment alerts via WhatsApp, Telegram and Slack.
 
 ### POS Sync Features (Optional)
 - **Inventory Sync**: Sync products from your Tuma POS to WooCommerce
+- **Variable Products**: Full support for products with variations (size, color, etc.)
 - **Sales Sync**: Online sales automatically recorded in your POS
+- **Variant Stock Management**: Individual stock tracking for each product variation
 - **Stock Management**: Unified stock levels across online and physical stores
 - **Automatic Sync**: Hourly product sync keeps inventory up to date
 - **Manual Sync**: One-click product sync from admin panel
+
+### Product Variations Support
+- **Variable Product Sync**: Products with variants in Tuma POS are synced as WooCommerce Variable Products
+- **Attribute Mapping**: Variation attributes (Color, Size, etc.) are automatically created
+- **Variant Stock**: Each variation maintains its own stock level
+- **Variant Pricing**: Support for different prices per variation
+- **SKU Mapping**: Variant SKUs are mapped for accurate inventory tracking
 
 ## Requirements
 

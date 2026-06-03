@@ -2,6 +2,40 @@
 
 Accept M-Pesa payments to any bank account through the Tuma Payments API in your WooCommerce store. Includes optional POS inventory sync to keep your online and physical store inventory in sync.
 
+## Supported Payment Methods & Institutions
+
+Tuma Payments Gateway supports all major banks, microfinance institutions, and SACCOs in Kenya, as well as mobile money platforms with **real-time direct fund settlement** to accounts.
+
+### Mobile Money
+- **M-PESA** (Paybill Number / Buy Goods Till Number)
+- **Airtel Money**
+
+### Banks
+- **Equity Bank**
+- **Kenya Commercial Bank (KCB)**
+- **Cooperative Bank of Kenya**
+- **Diamond Trust Bank (DTB)**
+- **NCBA**
+- **Family Bank**
+- **Stanbic Bank**
+- **I&M Bank**
+- **Access Bank**
+- **Standard Chartered Bank**
+- **ABSA**
+- **SBM Bank Kenya**
+- **National Bank**
+- **Sidian Bank**
+
+### Microfinance & Digital Banks
+- **Loop**
+- **KWFT**
+- **Faulu Bank**
+
+### SACCOs
+- **Fortune Sacco**
+- **K-Unity Sacco**
+- And many more...
+
 ## Getting Started
 
 ### Step 1: Create Your Tuma Payments Account

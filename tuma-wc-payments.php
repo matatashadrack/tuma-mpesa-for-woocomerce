@@ -474,6 +474,9 @@ function init_tuma_payments_gateway() {
                 return array('result' => 'fail');
             }
             
+            // Calculate shipping fee from order
+            $shipping_total = floatval($order->get_shipping_total());
+            
             // Prepare sale payload
             $sale_payload = array(
                 'items'          => $items,
@@ -482,6 +485,7 @@ function init_tuma_payments_gateway() {
                 'customer_phone' => $phone,
                 'payment_method' => 'mpesa',
                 'callback_url'   => home_url('wc-api/tuma_pos_callback'),
+                'shipping_fee'   => $shipping_total,
             );
             
             // Make sale request to Tuma POS
@@ -649,10 +653,19 @@ function init_tuma_payments_gateway() {
                 exit(json_encode(array('success' => true, 'message' => 'Already processed')));
             }
             
+            // Extract callback data
             $result_code = isset($data['result_code']) ? intval($data['result_code']) : -1;
+            $result_desc = isset($data['result_desc']) ? $data['result_desc'] : '';
+            $sale_id = isset($data['sale_id']) ? $data['sale_id'] : '';
+            $checkout_request_id = isset($data['checkout_request_id']) ? $data['checkout_request_id'] : '';
+            $amount = isset($data['amount']) ? floatval($data['amount']) : 0;
+            $timestamp = isset($data['timestamp']) ? $data['timestamp'] : '';
             
-            if ($result_code === 0) {
-                // Payment successful
+            // result_code 0 = success, any other code = failure
+            $is_success = ($result_code === 0);
+            
+            if ($is_success) {
+                // Payment successful - capture M-Pesa receipt number
                 $receipt = isset($data['mpesa_receipt_number']) ? $data['mpesa_receipt_number'] : '';
                 $phone = $order->get_meta('_tuma_phone');
                 $old_status = $order->get_status();
@@ -663,34 +676,57 @@ function init_tuma_payments_gateway() {
                 
                 // Add comprehensive order note
                 $note = sprintf(
-                    'Full MPesa Payment Received (POS Sync) From %s. Receipt Number %s. Sale ID: %s. Order status changed from %s to Completed.',
+                    'Full MPesa Payment Received (POS Sync) From %s. Receipt Number: %s. Sale ID: %s. Amount: KES %s. Order status changed from %s to Completed.',
                     $phone,
                     $receipt,
-                    $data['sale_id'],
+                    $sale_id,
+                    number_format($amount, 2),
                     ucfirst(str_replace('-', ' ', $old_status))
                 );
                 $order->add_order_note($note);
                 
-                // Store additional callback data
-                if (!empty($data['checkout_request_id'])) {
-                    $order->update_meta_data('_tuma_checkout_request_id', $data['checkout_request_id']);
-                }
+                // Store all callback data as order meta
                 $order->update_meta_data('_tuma_mpesa_receipt', $receipt);
+                $order->update_meta_data('_tuma_checkout_request_id', $checkout_request_id);
+                $order->update_meta_data('_tuma_sale_id', $sale_id);
+                $order->update_meta_data('_tuma_result_code', $result_code);
+                $order->update_meta_data('_tuma_result_desc', $result_desc);
+                $order->update_meta_data('_tuma_callback_amount', $amount);
+                $order->update_meta_data('_tuma_callback_timestamp', $timestamp);
                 $order->save();
                 
             } else {
-                // Payment failed
-                $failure_reason = isset($data['failure_reason']) ? $data['failure_reason'] : 
-                                  (isset($data['result_desc']) ? $data['result_desc'] : 'Payment failed');
+                // Payment failed or cancelled - capture failure details
+                $failure_reason = isset($data['failure_reason']) ? $data['failure_reason'] : '';
+                $status = isset($data['status']) ? $data['status'] : 'failed';
+                
+                // Determine the appropriate WC status based on Tuma status
+                $wc_status = ($status === 'cancelled') ? 'cancelled' : 'failed';
+                $status_label = ($status === 'cancelled') ? 'cancelled' : 'failed';
+                
+                // Use failure_reason if available, otherwise use result_desc
+                $reason_text = !empty($failure_reason) ? $failure_reason : (!empty($result_desc) ? $result_desc : 'Payment failed');
                 
                 $order->set_transaction_id('fail');
-                $order->update_status('failed', 'M-Pesa payment failed (POS Sync): ' . $failure_reason);
+                $order->update_status($wc_status, 'M-Pesa payment ' . $status_label . ' (POS Sync): ' . $reason_text);
                 $order->add_order_note(sprintf(
-                    'POS Sale payment failed. Sale ID: %s. Reason: %s. Result Code: %d',
-                    $data['sale_id'],
+                    'POS Sale payment %s. Sale ID: %s. Result Code: %d. Reason: %s. Result Desc: %s',
+                    $status_label,
+                    $sale_id,
+                    $result_code,
                     $failure_reason,
-                    $result_code
+                    $result_desc
                 ));
+                
+                // Store failure details as order meta
+                $order->update_meta_data('_tuma_checkout_request_id', $checkout_request_id);
+                $order->update_meta_data('_tuma_sale_id', $sale_id);
+                $order->update_meta_data('_tuma_result_code', $result_code);
+                $order->update_meta_data('_tuma_result_desc', $result_desc);
+                $order->update_meta_data('_tuma_failure_reason', $failure_reason);
+                $order->update_meta_data('_tuma_callback_amount', $amount);
+                $order->update_meta_data('_tuma_callback_timestamp', $timestamp);
+                $order->update_meta_data('_tuma_payment_status', $status);
                 $order->save();
             }
             
@@ -1068,6 +1104,9 @@ function init_tuma_payments_gateway() {
                 return;
             }
             
+            // Calculate shipping fee from order
+            $shipping_total = floatval($order->get_shipping_total());
+            
             // Prepare sale payload
             $sale_payload = array(
                 'items'          => $items,
@@ -1076,6 +1115,7 @@ function init_tuma_payments_gateway() {
                 'customer_phone' => $phone,
                 'payment_method' => 'mpesa',
                 'callback_url'   => home_url('wc-api/tuma_pos_callback'),
+                'shipping_fee'   => $shipping_total,
             );
             
             $response = wp_remote_post($this->api_base_url . '/sales', array(

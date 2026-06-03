@@ -4,7 +4,7 @@ Accept M-Pesa payments to any bank account through the Tuma Payments API in your
 
 ## Supported Payment Methods & Institutions
 
-Tuma Payments Gateway supports all major banks, microfinance institutions, and SACCOs in Kenya, as well as mobile money platforms with **real-time direct fund settlement** to accounts.
+Tuma Payments Gateway supports all major banks, microfinance institutions, and SACCOs in Kenya, as well as mobile money platforms with **real-time direct fund settlement** to both **personal and business accounts**. Funds are settled instantly to your preferred account across all supported channels.
 
 ### Mobile Money
 - **M-PESA** (Paybill Number / Buy Goods Till Number)

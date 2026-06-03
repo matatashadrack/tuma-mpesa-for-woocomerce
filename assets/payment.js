@@ -60,6 +60,11 @@ jQuery(document).ready(function ($) {
 
                         $("#renitiate-tuma-table").hide();
 
+                        // Hide Pay/Cancel action buttons on successful payment
+                        $("a.button.pay, a.button.cancel, .woocommerce-button.pay, .woocommerce-button.cancel").hide();
+                        $("a[href*='order-pay'], a[href*='cancel_order']").hide();
+                        $(".order-actions, .order_actions, .woocommerce-order-actions").hide();
+
                         clearInterval(checker);
 
                         // Don't redirect, just stop polling

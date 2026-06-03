@@ -387,6 +387,43 @@ function init_tuma_payments_gateway() {
         }
 
         /**
+         * Calculate the additional charges (shipping, fees, taxes) that are not
+         * part of the product line items. In POS sync mode, the POS recalculates
+         * the order total from product prices, so we must pass these extra charges
+         * as the shipping_fee to ensure the customer is billed the full WooCommerce
+         * order total (including shipping methods/fees like shipping-by-cities).
+         */
+        private function calculate_pos_shipping_fee($order) {
+            // Sum of product line item totals (incl. their tax)
+            $products_total = 0;
+            foreach ($order->get_items() as $item) {
+                $products_total += floatval($item->get_total()) + floatval($item->get_total_tax());
+            }
+
+            // Everything else in the order total = shipping + fees + remaining tax - discounts
+            $extra = floatval($order->get_total()) - $products_total;
+
+            // Never send a negative shipping fee
+            if ($extra < 0) {
+                $extra = 0;
+            }
+
+            // Round to 2 decimals
+            $extra = round($extra, 2);
+
+            error_log(sprintf(
+                'Tuma POS shipping calc: order_total=%s, products_total=%s, shipping_total=%s, shipping_tax=%s => shipping_fee=%s',
+                $order->get_total(),
+                $products_total,
+                $order->get_shipping_total(),
+                $order->get_shipping_tax(),
+                $extra
+            ));
+
+            return $extra;
+        }
+
+        /**
          * Process payment through Tuma POS Sales API
          * This syncs the order with POS inventory
          */
@@ -482,8 +519,8 @@ function init_tuma_payments_gateway() {
                 return array('result' => 'fail');
             }
             
-            // Calculate shipping fee from order
-            $shipping_total = floatval($order->get_shipping_total());
+            // Calculate shipping fee from WooCommerce order (shipping + fees + tax)
+            $shipping_total = $this->calculate_pos_shipping_fee($order);
             
             // Prepare sale payload
             $sale_payload = array(
@@ -492,7 +529,7 @@ function init_tuma_payments_gateway() {
                 'customer_email' => $order->get_billing_email(),
                 'customer_phone' => $phone,
                 'payment_method' => 'mpesa',
-                'callback_url'   => home_url('wc-api/tuma_pos_callback'),
+                'callback_url'   => home_url('?wc-api=tuma_pos_callback'),
                 'shipping_fee'   => $shipping_total,
             );
             
@@ -518,19 +555,24 @@ function init_tuma_payments_gateway() {
             error_log('Tuma POS Sale response: ' . wp_remote_retrieve_body($response));
             
             if ($status_code === 200 || $status_code === 201) {
+                // Sale data is nested under data.sale
+                $sale_data = isset($body['data']['sale']) ? $body['data']['sale'] : $body['data'];
+                
                 // Store sale details in order meta
-                if (!empty($body['data']['sale_id'])) {
-                    $order->update_meta_data('_tuma_sale_id', $body['data']['sale_id']);
+                if (!empty($sale_data['id'])) {
+                    $order->update_meta_data('_tuma_sale_id', $sale_data['id']);
                 }
-                if (!empty($body['data']['merchant_request_id'])) {
-                    $order->update_meta_data('_tuma_merchant_request_id', $body['data']['merchant_request_id']);
+                if (!empty($sale_data['merchant_request_id'])) {
+                    $order->update_meta_data('_tuma_merchant_request_id', $sale_data['merchant_request_id']);
                 }
-                if (!empty($body['data']['checkout_request_id'])) {
-                    $order->update_meta_data('_tuma_checkout_request_id', $body['data']['checkout_request_id']);
+                if (!empty($sale_data['checkout_request_id'])) {
+                    $order->update_meta_data('_tuma_checkout_request_id', $sale_data['checkout_request_id']);
                 }
                 $order->update_meta_data('_tuma_phone', $phone);
                 $order->update_meta_data('_tuma_pos_sync', 'yes');
                 $order->save();
+                
+                error_log('Tuma POS Sale: Saved sale_id ' . ($sale_data['id'] ?? 'none') . ' to order ' . $order->get_id());
                 
                 // Mark as pending payment
                 $order->update_status('pending', __('Awaiting M-Pesa payment confirmation (POS Sync).', 'woocommerce'));
@@ -627,24 +669,39 @@ function init_tuma_payments_gateway() {
             error_log('Tuma POS callback received: ' . $payload);
             
             if (!$data || empty($data['sale_id'])) {
+                error_log('Tuma POS callback: Invalid payload - missing sale_id');
                 http_response_code(400);
                 exit(json_encode(array('success' => false, 'message' => 'Invalid payload')));
             }
             
-            // Find order by sale_id
+            error_log('Tuma POS callback: Looking for order with sale_id: ' . $data['sale_id']);
+            
+            // Find order by sale_id using meta_query for HPOS compatibility
             $orders = wc_get_orders(array(
-                'meta_key'   => '_tuma_sale_id',
-                'meta_value' => $data['sale_id'],
-                'limit'      => 1,
+                'meta_query' => array(
+                    array(
+                        'key'   => '_tuma_sale_id',
+                        'value' => $data['sale_id'],
+                    ),
+                ),
+                'limit' => 1,
             ));
+            
+            error_log('Tuma POS callback: Found ' . count($orders) . ' orders by sale_id');
             
             // Fallback to merchant_request_id
             if (empty($orders) && !empty($data['merchant_request_id'])) {
+                error_log('Tuma POS callback: Trying merchant_request_id: ' . $data['merchant_request_id']);
                 $orders = wc_get_orders(array(
-                    'meta_key'   => '_tuma_merchant_request_id',
-                    'meta_value' => $data['merchant_request_id'],
-                    'limit'      => 1,
+                    'meta_query' => array(
+                        array(
+                            'key'   => '_tuma_merchant_request_id',
+                            'value' => $data['merchant_request_id'],
+                        ),
+                    ),
+                    'limit' => 1,
                 ));
+                error_log('Tuma POS callback: Found ' . count($orders) . ' orders by merchant_request_id');
             }
             
             if (empty($orders)) {
@@ -1112,8 +1169,8 @@ function init_tuma_payments_gateway() {
                 return;
             }
             
-            // Calculate shipping fee from order
-            $shipping_total = floatval($order->get_shipping_total());
+            // Calculate shipping fee from WooCommerce order (shipping + fees + tax)
+            $shipping_total = $this->calculate_pos_shipping_fee($order);
             
             // Prepare sale payload
             $sale_payload = array(
@@ -1122,7 +1179,7 @@ function init_tuma_payments_gateway() {
                 'customer_email' => $order->get_billing_email(),
                 'customer_phone' => $phone,
                 'payment_method' => 'mpesa',
-                'callback_url'   => home_url('wc-api/tuma_pos_callback'),
+                'callback_url'   => home_url('?wc-api=tuma_pos_callback'),
                 'shipping_fee'   => $shipping_total,
             );
             
@@ -1144,19 +1201,22 @@ function init_tuma_payments_gateway() {
             $status_code = wp_remote_retrieve_response_code($response);
             
             if ($status_code === 200 || $status_code === 201) {
-                if (!empty($body['data']['sale_id'])) {
-                    $order->update_meta_data('_tuma_sale_id', $body['data']['sale_id']);
+                // Sale data is nested under data.sale
+                $sale_data = isset($body['data']['sale']) ? $body['data']['sale'] : $body['data'];
+                
+                if (!empty($sale_data['id'])) {
+                    $order->update_meta_data('_tuma_sale_id', $sale_data['id']);
                 }
-                if (!empty($body['data']['merchant_request_id'])) {
-                    $order->update_meta_data('_tuma_merchant_request_id', $body['data']['merchant_request_id']);
+                if (!empty($sale_data['merchant_request_id'])) {
+                    $order->update_meta_data('_tuma_merchant_request_id', $sale_data['merchant_request_id']);
                 }
-                if (!empty($body['data']['checkout_request_id'])) {
-                    $order->update_meta_data('_tuma_checkout_request_id', $body['data']['checkout_request_id']);
+                if (!empty($sale_data['checkout_request_id'])) {
+                    $order->update_meta_data('_tuma_checkout_request_id', $sale_data['checkout_request_id']);
                 }
                 $order->save();
                 
                 $order->add_order_note(
-                    sprintf(__('Tuma POS sale resent to %s. Sale ID: %s'), $phone, $body['data']['sale_id'] ?? 'N/A')
+                    sprintf(__('Tuma POS sale resent to %s. Sale ID: %s'), $phone, $sale_data['id'] ?? 'N/A')
                 );
                 
                 wp_send_json_success($body['data'] ?? array());

@@ -2,13 +2,13 @@
 
 /**
  * @package Tuma Payments for WooCommerce
- * @author Tuma Payments < support@tuma.co.ke >
+ * @author Tuma Payments < matata@tuma.co.ke >
  * @version 1.3.2
  *
  * Plugin Name: Tuma Payments for WooCommerce
  * Plugin URI: https://merchant.tuma.co.ke/
  * Description: This plugin extends WordPress and WooCommerce functionality to integrate your online shop with bank accounts to accept and process online payments via M-Pesa. Supports product variations sync with Tuma POS.
- * Author: Shadrack Matata < support@tuma.co.ke >
+ * Author: Shadrack Matata < matata@tuma.co.ke >
  * Version: 1.3.2
  * Author URI: https://twitter.com/shadrac_matata/
  *
@@ -135,6 +135,10 @@ function init_tuma_payments_gateway() {
         public $api_base_url;
         public $enable_pos_sync;
         public $enable_product_sync;
+        public $enable_sms;
+        public $sms_token;
+        public $sms_sender_id;
+        public $admin_number;
         
         public function __construct() {
             $this->id                 = 'tuma_payments';
@@ -160,6 +164,12 @@ function init_tuma_payments_gateway() {
             // POS sync settings
             $this->enable_pos_sync     = 'yes' === $this->get_option('enable_pos_sync');
             $this->enable_product_sync = 'yes' === $this->get_option('enable_product_sync');
+
+            // SMS (Mobile Sasa) settings
+            $this->enable_sms    = 'yes' === $this->get_option('enable_sms');
+            $this->sms_token     = $this->get_option('mobilesasa_token');
+            $this->sms_sender_id = $this->get_option('mobilesasa_sender_id');
+            $this->admin_number  = $this->get_option('admin_number');
 
             // Initialize gateway settings
             add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
@@ -256,6 +266,42 @@ function init_tuma_payments_gateway() {
                     'type'        => 'tuma_sync_products_button',
                     'description' => 'Manually trigger a product sync from Tuma POS.',
                 ),
+                'sms_section' => array(
+                    'title'       => 'SMS Notifications (Mobile Sasa)',
+                    'type'        => 'title',
+                    'description' => 'Send SMS confirmations to customers and the admin when payments succeed or fail.',
+                ),
+                'enable_sms' => array(
+                    'title'       => 'Enable SMS',
+                    'type'        => 'checkbox',
+                    'label'       => 'Send SMS notifications via Mobile Sasa',
+                    'description' => 'When disabled, no SMS is sent and the Mobile Sasa credentials below are not required.',
+                    'default'     => 'no',
+                ),
+                'mobilesasa_token' => array(
+                    'title'       => 'Mobile Sasa API Token',
+                    'type'        => 'password',
+                    'description' => 'Your Mobile Sasa API token (starts with mbs_).',
+                    'default'     => '',
+                    'desc_tip'    => true,
+                    'class'       => 'tuma-sms-field',
+                ),
+                'mobilesasa_sender_id' => array(
+                    'title'       => 'Sender ID',
+                    'type'        => 'text',
+                    'description' => 'An approved Mobile Sasa sender ID on your account (case-sensitive).',
+                    'default'     => 'MOBILESASA',
+                    'desc_tip'    => true,
+                    'class'       => 'tuma-sms-field',
+                ),
+                'admin_number' => array(
+                    'title'       => 'Admin Phone Number',
+                    'type'        => 'text',
+                    'description' => 'Admin/support number. Included in the customer SMS and used to notify the admin of successful and failed payments.',
+                    'default'     => '',
+                    'desc_tip'    => true,
+                    'class'       => 'tuma-sms-field',
+                ),
             );
         }
 
@@ -328,6 +374,167 @@ function init_tuma_payments_gateway() {
             }
             
             return false; // Invalid phone number
+        }
+
+        /**
+         * Extract the customer phone number from a callback payload.
+         * The last 10 digits of the checkout_request_id are the customer number
+         * (e.g. ws_CO_28022026175239080729590095 -> 0729590095).
+         * Falls back to the phone stored on the order when unusable.
+         */
+        private function get_callback_phone($data, $order = null) {
+            if (!empty($data['checkout_request_id'])) {
+                $digits = preg_replace('/[^0-9]/', '', $data['checkout_request_id']);
+                if (strlen($digits) >= 10) {
+                    $phone = $this->normalize_phone_number(substr($digits, -10));
+                    if ($phone) {
+                        return $phone;
+                    }
+                }
+            }
+
+            if (!empty($data['phone'])) {
+                $phone = $this->normalize_phone_number($data['phone']);
+                if ($phone) {
+                    return $phone;
+                }
+            }
+
+            if ($order) {
+                return $this->normalize_phone_number($order->get_meta('_tuma_phone'));
+            }
+
+            return false;
+        }
+
+        /**
+         * Format an amount for SMS: 10 -> "10", 10.5 -> "10.50"
+         */
+        private function format_sms_amount($amount) {
+            $amount = (float) $amount;
+            return number_format($amount, floor($amount) == $amount ? 0 : 2);
+        }
+
+        /**
+         * Send an SMS through the Mobile Sasa API.
+         */
+        private function send_sms($phone, $message) {
+            if (!$this->enable_sms) {
+                return false;
+            }
+
+            if (empty($this->sms_token) || empty($this->sms_sender_id)) {
+                error_log('Tuma SMS: Mobile Sasa token or sender ID not configured');
+                return false;
+            }
+
+            if (empty($phone) || empty($message)) {
+                return false;
+            }
+
+            $response = wp_remote_post('https://api.mobilesasa.com/v1/send/message', array(
+                'headers' => array(
+                    'Content-Type'  => 'application/json',
+                    'Accept'        => 'application/json',
+                    'Authorization' => 'Bearer ' . $this->sms_token,
+                ),
+                'body' => json_encode(array(
+                    'senderID' => $this->sms_sender_id,
+                    'phone'    => $phone,
+                    'message'  => $message,
+                )),
+                'timeout' => 30
+            ));
+
+            if (is_wp_error($response)) {
+                error_log('Tuma SMS error to ' . $phone . ': ' . $response->get_error_message());
+                return false;
+            }
+
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+            $sent = isset($body['status']) ? (bool) $body['status'] : (wp_remote_retrieve_response_code($response) === 200);
+
+            if (!$sent) {
+                error_log('Tuma SMS failed to ' . $phone . ': ' . wp_remote_retrieve_body($response));
+            }
+
+            return $sent;
+        }
+
+        /**
+         * Notify the customer and the admin about a successful payment.
+         */
+        private function send_payment_success_sms($order, $data) {
+            if (!$this->enable_sms || $order->get_meta('_tuma_sms_sent') === 'success') {
+                return;
+            }
+
+            $phone   = $this->get_callback_phone($data, $order);
+            $amount  = $this->format_sms_amount(isset($data['amount']) ? $data['amount'] : $order->get_total());
+            $receipt = isset($data['mpesa_receipt_number']) ? $data['mpesa_receipt_number'] : $order->get_transaction_id();
+
+            if ($phone) {
+                $this->send_sms($phone, sprintf(
+                    'Hi, we have received your order and KES %s payment via MPESA transaction %s. Thank you call %s.',
+                    $amount,
+                    $receipt,
+                    $this->admin_number
+                ));
+            }
+
+            if (!empty($this->admin_number)) {
+                $admin_phone = $this->normalize_phone_number($this->admin_number);
+                if ($admin_phone) {
+                    $this->send_sms($admin_phone, sprintf(
+                        'Order #%s paid. KES %s received from %s via MPESA transaction %s.',
+                        $order->get_order_number(),
+                        $amount,
+                        $phone ? $phone : 'unknown number',
+                        $receipt
+                    ));
+                }
+            }
+
+            $order->update_meta_data('_tuma_sms_sent', 'success');
+            $order->save();
+        }
+
+        /**
+         * Notify the customer and the admin about a failed/cancelled payment.
+         */
+        private function send_payment_failure_sms($order, $data, $reason) {
+            // Guard against duplicate callbacks for the same failed attempt
+            $attempt = 'failed:' . (isset($data['checkout_request_id']) ? $data['checkout_request_id'] : '');
+            if (!$this->enable_sms || $order->get_meta('_tuma_sms_sent') === $attempt) {
+                return;
+            }
+
+            $phone  = $this->get_callback_phone($data, $order);
+            $amount = $this->format_sms_amount(isset($data['amount']) ? $data['amount'] : $order->get_total());
+
+            if ($phone) {
+                $this->send_sms($phone, sprintf(
+                    'Hi, your KES %s payment has failed due to %s. Try again.',
+                    $amount,
+                    $reason
+                ));
+            }
+
+            if (!empty($this->admin_number)) {
+                $admin_phone = $this->normalize_phone_number($this->admin_number);
+                if ($admin_phone) {
+                    $this->send_sms($admin_phone, sprintf(
+                        'Order #%s payment failed. Customer %s. Amount KES %s. Reason %s.',
+                        $order->get_order_number(),
+                        $phone ? $phone : 'unknown number',
+                        $amount,
+                        $reason
+                    ));
+                }
+            }
+
+            $order->update_meta_data('_tuma_sms_sent', $attempt);
+            $order->save();
         }
 
         public function process_payment($order_id) {
@@ -759,6 +966,8 @@ function init_tuma_payments_gateway() {
                 $order->update_meta_data('_tuma_callback_amount', $amount);
                 $order->update_meta_data('_tuma_callback_timestamp', $timestamp);
                 $order->save();
+
+                $this->send_payment_success_sms($order, $data);
                 
             } else {
                 // Payment failed or cancelled - capture failure details
@@ -793,6 +1002,8 @@ function init_tuma_payments_gateway() {
                 $order->update_meta_data('_tuma_callback_timestamp', $timestamp);
                 $order->update_meta_data('_tuma_payment_status', $status);
                 $order->save();
+
+                $this->send_payment_failure_sms($order, $data, $reason_text);
             }
             
             http_response_code(200);
@@ -958,6 +1169,8 @@ function init_tuma_payments_gateway() {
                         );
                         $order->add_order_note($note);
                         $order->save();
+
+                        $this->send_payment_success_sms($order, $data);
                         break;
                         
                     case 'failed':
@@ -967,6 +1180,8 @@ function init_tuma_payments_gateway() {
                         $order->update_status('failed', 'M-Pesa payment failed: ' . $reason);
                         $order->add_order_note('Payment failed: ' . $reason);
                         $order->save();
+
+                        $this->send_payment_failure_sms($order, $data, $reason);
                         break;
                         
                     case 'cancelled':
@@ -974,6 +1189,8 @@ function init_tuma_payments_gateway() {
                         $order->update_status('cancelled', 'M-Pesa payment was cancelled by customer');
                         $order->add_order_note('Payment cancelled by customer');
                         $order->save();
+
+                        $this->send_payment_failure_sms($order, $data, 'the payment was cancelled');
                         break;
                         
                     case 'pending':
@@ -1373,8 +1590,55 @@ function init_tuma_payments_gateway() {
             return ob_get_clean();
         }
 
+        /**
+         * Render the settings screen and hide the Mobile Sasa credentials
+         * until SMS notifications are enabled.
+         */
+        public function admin_options() {
+            parent::admin_options();
+            ?>
+            <script type="text/javascript">
+            jQuery(document).ready(function($) {
+                var toggle = $('#woocommerce_tuma_payments_enable_sms');
+                if (!toggle.length) {
+                    return;
+                }
+
+                var rows = $('.tuma-sms-field').closest('tr');
+
+                function refresh() {
+                    rows.toggle(toggle.is(':checked'));
+                }
+
+                toggle.on('change', refresh);
+                refresh();
+            });
+            </script>
+            <?php
+        }
+
         public function process_admin_options() {
             $saved = parent::process_admin_options();
+
+            // Mobile Sasa credentials are only required when SMS is enabled
+            if ('yes' === $this->get_option('enable_sms')) {
+                $missing = array();
+                if (!$this->get_option('mobilesasa_token')) {
+                    $missing[] = 'API Token';
+                }
+                if (!$this->get_option('mobilesasa_sender_id')) {
+                    $missing[] = 'Sender ID';
+                }
+                if (!$this->get_option('admin_number')) {
+                    $missing[] = 'Admin Phone Number';
+                }
+
+                if ($missing) {
+                    WC_Admin_Settings::add_error('Tuma Payments: SMS notifications are enabled but the following Mobile Sasa settings are missing: ' . implode(', ', $missing) . '.');
+                } elseif (!$this->normalize_phone_number($this->get_option('admin_number'))) {
+                    WC_Admin_Settings::add_error('Tuma Payments: The Admin Phone Number is not a valid Kenyan mobile number.');
+                }
+            }
             
             // Auto-test connection when saving if credentials are provided
             if ($this->get_option('api_email') && $this->get_option('api_key')) {

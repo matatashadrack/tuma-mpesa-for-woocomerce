@@ -140,6 +140,26 @@ Get instant Payment alerts via WhatsApp, Telegram and Slack.
 
 
 
+## SMS Confirmation (Mobile Sasa)
+
+Send an SMS to the customer and the admin whenever a payment succeeds or fails.
+
+### Configure SMS
+1. Go to **WooCommerce > Settings > Payments > Tuma Payments**
+2. Scroll to the **SMS Notifications (Mobile Sasa)** section
+3. Tick **Enable SMS** — the credential fields below only appear once SMS is enabled
+4. Enter your **Mobile Sasa API Token** (starts with `mbs_`)
+5. Enter an approved **Sender ID** (case-sensitive, e.g. `MOBILESASA`)
+6. Enter the **Admin Phone Number** — it is included in the customer SMS and receives the admin alerts
+
+### Messages sent
+- **Customer, payment successful**: `Hi, we have received your order and KES {amount} payment via MPESA transaction {mpesa_receipt_number}. Thank you call {admin_number}.`
+- **Customer, payment failed**: `Hi, your KES {amount} payment has failed due to {failure_reason}. Try again.`
+- **Admin, payment successful**: order number, amount, customer number and M-Pesa receipt
+- **Admin, payment failed**: order number, customer number, amount and failure reason
+
+The customer number is taken from the last 10 digits of the callback's `checkout_request_id`, falling back to the number stored on the order. Messages are sent from the payment callback, and are de-duplicated so repeated callbacks do not resend the same SMS.
+
 ## Features
 
 ### Payment Features
@@ -208,7 +228,7 @@ Get instant Payment alerts via WhatsApp, Telegram and Slack.
 - **Merchant Portal**: [https://merchant.tuma.co.ke](https://merchant.tuma.co.ke)
 
 ### Support Channels
-- **Email**: support@tuma.co.ke
+- **Email**: matata@tuma.co.ke
 - **Phone**: +254722854082 / +254733854082
 - **Twitter**: [@tumaonline](https://twitter.com/tumaonline)
 - **Business Hours**: Monday - Friday, 8:00 AM - 6:00 PM EAT
@@ -216,7 +236,7 @@ Get instant Payment alerts via WhatsApp, Telegram and Slack.
 ### Getting Help
 
 For technical support and questions:
-- Email: support@tuma.co.ke
+- Email: matata@tuma.co.ke
 - Documentation: [https://merchant.tuma.co.ke/docs](https://merchant.tuma.co.ke/docs)
 
 ## License

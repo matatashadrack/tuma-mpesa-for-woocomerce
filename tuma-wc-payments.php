@@ -788,12 +788,13 @@ function init_tuma_payments_gateway() {
             error_log('Tuma POS Sale response: ' . wp_remote_retrieve_body($response));
             
             if ($status_code === 200 || $status_code === 201) {
-                // Sale data is nested under data.sale
+                // Cash responses use data.sale; M-Pesa responses return fields directly in data.
                 $sale_data = isset($body['data']['sale']) ? $body['data']['sale'] : $body['data'];
+                $sale_id = isset($sale_data['sale_id']) ? $sale_data['sale_id'] : ($sale_data['id'] ?? '');
                 
                 // Store sale details in order meta
-                if (!empty($sale_data['id'])) {
-                    $order->update_meta_data('_tuma_sale_id', $sale_data['id']);
+                if (!empty($sale_id)) {
+                    $order->update_meta_data('_tuma_sale_id', $sale_id);
                 }
                 if (!empty($sale_data['merchant_request_id'])) {
                     $order->update_meta_data('_tuma_merchant_request_id', $sale_data['merchant_request_id']);
@@ -805,7 +806,7 @@ function init_tuma_payments_gateway() {
                 $order->update_meta_data('_tuma_pos_sync', 'yes');
                 $order->save();
                 
-                error_log('Tuma POS Sale: Saved sale_id ' . ($sale_data['id'] ?? 'none') . ' to order ' . $order->get_id());
+                error_log('Tuma POS Sale: Saved sale_id ' . ($sale_id ?: 'none') . ' to order ' . $order->get_id());
                 
                 // Mark as pending payment
                 $order->update_status('pending', __('Awaiting M-Pesa payment confirmation (POS Sync).', 'woocommerce'));
@@ -1445,11 +1446,12 @@ function init_tuma_payments_gateway() {
             $status_code = wp_remote_retrieve_response_code($response);
             
             if ($status_code === 200 || $status_code === 201) {
-                // Sale data is nested under data.sale
+                // Cash responses use data.sale; M-Pesa responses return fields directly in data.
                 $sale_data = isset($body['data']['sale']) ? $body['data']['sale'] : $body['data'];
+                $sale_id = isset($sale_data['sale_id']) ? $sale_data['sale_id'] : ($sale_data['id'] ?? '');
                 
-                if (!empty($sale_data['id'])) {
-                    $order->update_meta_data('_tuma_sale_id', $sale_data['id']);
+                if (!empty($sale_id)) {
+                    $order->update_meta_data('_tuma_sale_id', $sale_id);
                 }
                 if (!empty($sale_data['merchant_request_id'])) {
                     $order->update_meta_data('_tuma_merchant_request_id', $sale_data['merchant_request_id']);
@@ -1460,7 +1462,7 @@ function init_tuma_payments_gateway() {
                 $order->save();
                 
                 $order->add_order_note(
-                    sprintf(__('Tuma POS sale resent to %s. Sale ID: %s'), $phone, $sale_data['id'] ?? 'N/A')
+                    sprintf(__('Tuma POS sale resent to %s. Sale ID: %s'), $phone, $sale_id ?: 'N/A')
                 );
                 
                 wp_send_json_success($body['data'] ?? array());

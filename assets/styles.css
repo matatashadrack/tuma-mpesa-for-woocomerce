@@ -1,0 +1,96 @@
+#wc-tuma_payments-form {
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+}
+
+#wc-tuma_payments-form .form-row {
+    margin-bottom: 15px;
+}
+
+#wc-tuma_payments-form label {
+    font-weight: 600;
+    margin-bottom: 5px;
+    display: block;
+}
+
+#wc-tuma_payments-form input[type="tel"] {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    font-size: 16px;
+}
+
+#wc-tuma_payments-form input[type="tel"]:focus {
+    border-color: #007cba;
+    outline: none;
+    box-shadow: 0 0 0 1px #007cba;
+}
+
+#wc-tuma_payments-form input[type="tel"].error {
+    border-color: #d63638;
+}
+
+#wc-tuma_payments-form small {
+    color: #666;
+    font-size: 13px;
+    margin-top: 5px;
+    display: block;
+}
+
+.tuma-payment-icon {
+    width: 24px;
+    height: 24px;
+    vertical-align: middle;
+    margin-right: 8px;
+}
+
+#tuma-loading {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0,0,0,0.7);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+#tuma-loading .loading-content {
+    background: white;
+    padding: 30px;
+    border-radius: 8px;
+    text-align: center;
+    max-width: 400px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+}
+
+#tuma-loading h3 {
+    margin: 0 0 15px 0;
+    color: #333;
+}
+
+#tuma-loading p {
+    margin: 0 0 20px 0;
+    color: #666;
+    line-height: 1.5;
+}
+
+.spinner {
+    border: 4px solid #f3f3f3;
+    border-top: 4px solid #007cba;
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    animation: spin 1s linear infinite;
+    margin: 0 auto;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+

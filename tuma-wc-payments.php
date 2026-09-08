@@ -3,13 +3,13 @@
 /**
  * @package Tuma Payments for WooCommerce
  * @author Tuma Payments < matata@tuma.co.ke >
- * @version 1.4.1
+ * @version 1.4.2
  *
  * Plugin Name: Tuma Payments for WooCommerce
  * Plugin URI: https://merchant.tuma.co.ke/
  * Description: This plugin extends WordPress and WooCommerce functionality to integrate your online shop with bank accounts to accept and process online payments via M-Pesa. Supports product variations sync with Tuma POS.
  * Author: Shadrack Matata < matata@tuma.co.ke >
- * Version: 1.4.1
+ * Version: 1.4.2
  * Author URI: https://twitter.com/shadrac_matata/
  *
  * Requires at least: 6.7
@@ -28,7 +28,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TUMA_WC_VER', '1.4.1');
+define('TUMA_WC_VER', '1.4.2');
 if (!defined('TUMA_WC_PLUGIN_FILE')) {
     define('TUMA_WC_PLUGIN_FILE', __FILE__);
 }
@@ -2195,7 +2195,6 @@ function tuma_sync_woocommerce_product_to_pos($product, $token, $force_update = 
     $sku = trim((string) $product->get_sku());
     $payload = array(
         'name'         => $product->get_name(),
-        'description'  => wp_strip_all_tags($product->get_description()),
         'sku'          => $sku !== '' ? $sku : tuma_generated_sku($product->get_id()),
         'price'        => (float) ($product->get_price() !== '' ? $product->get_price() : 0),
         'stock'        => max(0, $stock),

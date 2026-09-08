@@ -103,6 +103,7 @@ If you use Tuma POS for your physical store, you can enable inventory and sales 
 - Use **Import WooCommerce to POS** to migrate an existing website catalog and its current stock in one click
 - Existing products are matched by their stored Tuma ID or exact SKU, so running the import again updates instead of duplicating them
 - Simple and variable products are supported, including per-variation SKU, price, and stock
+- WooCommerce descriptions are intentionally not sent to POS, avoiding oversized website HTML/content in POS product records
 - Leave **Website to POS Sync** enabled to create future WooCommerce products in Tuma POS immediately
 
 ### How POS Sync Works

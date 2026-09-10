@@ -172,9 +172,10 @@ The customer number is taken from the last 10 digits of the callback's `checkout
 
 ### Payment Features
 - **Real-time Payment Status**: Customers see live payment confirmation
+- **Webhook Fallback**: If no callback arrives within 45 seconds, the plugin securely queries Tuma for the payment status using the original STK-push JWT
 - **STK Push Integration**: Seamless M-Pesa payment experience
 - **Payment Retry**: Customers can resend STK push if needed
-- **Receipt Display**: M-Pesa receipt numbers shown to customers
+- **Receipt Display**: M-Pesa receipt numbers are shown when supplied; status-query confirmations also complete normally when no receipt number is available
 - **PDF Receipts**: Paid customers can download a secure receipt from the confirmation page or My Account
 - **Order Management**: Automatic order status updates
 - **Comprehensive Logging**: Detailed payment notes in order history

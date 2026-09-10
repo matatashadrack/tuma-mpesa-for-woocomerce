@@ -3,13 +3,13 @@
 /**
  * @package Tuma Payments for WooCommerce
  * @author Tuma Payments < matata@tuma.co.ke >
- * @version 1.4.3
+ * @version 1.4.4
  *
  * Plugin Name: Tuma Payments for WooCommerce
  * Plugin URI: https://merchant.tuma.co.ke/
  * Description: This plugin extends WordPress and WooCommerce functionality to integrate your online shop with bank accounts to accept and process online payments via M-Pesa. Supports product variations sync with Tuma POS.
  * Author: Shadrack Matata < matata@tuma.co.ke >
- * Version: 1.4.3
+ * Version: 1.4.4
  * Author URI: https://twitter.com/shadrac_matata/
  *
  * Requires at least: 6.7
@@ -28,7 +28,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TUMA_WC_VER', '1.4.3');
+define('TUMA_WC_VER', '1.4.4');
 if (!defined('TUMA_WC_PLUGIN_FILE')) {
     define('TUMA_WC_PLUGIN_FILE', __FILE__);
 }
@@ -142,6 +142,9 @@ function init_tuma_payments_gateway() {
         public $sms_token;
         public $sms_sender_id;
         public $admin_number;
+
+        const STATUS_FALLBACK_DELAY = 45;
+        const STATUS_QUERY_INTERVAL = 30;
         
         public function __construct() {
             $this->id                 = 'tuma_payments';
@@ -498,6 +501,7 @@ function init_tuma_payments_gateway() {
             $phone   = $this->get_callback_phone($data, $order);
             $amount  = $this->format_sms_amount(isset($data['amount']) ? $data['amount'] : $order->get_total());
             $receipt = isset($data['mpesa_receipt_number']) ? $data['mpesa_receipt_number'] : $order->get_transaction_id();
+            $receipt = $receipt ? $receipt : 'unavailable';
 
             if ($phone) {
                 $this->send_sms($phone, sprintf(
@@ -597,6 +601,7 @@ function init_tuma_payments_gateway() {
                 $order->update_meta_data('_tuma_merchant_request_id', $response['data']['merchant_request_id']);
                 $order->update_meta_data('_tuma_checkout_request_id', $response['data']['checkout_request_id']);
                 $order->update_meta_data('_tuma_phone', $phone);
+                $this->prepare_status_fallback($order, $token);
                 $order->save();
 
                 // Mark as pending payment
@@ -835,6 +840,7 @@ function init_tuma_payments_gateway() {
                 }
                 $order->update_meta_data('_tuma_phone', $phone);
                 $order->update_meta_data('_tuma_pos_sync', 'yes');
+                $this->prepare_status_fallback($order, $token);
                 $order->save();
                 
                 error_log('Tuma POS Sale: Saved sale_id ' . ($sale_id ?: 'none') . ' to order ' . $order->get_id());
@@ -1160,6 +1166,126 @@ function init_tuma_payments_gateway() {
             return json_decode(wp_remote_retrieve_body($response), true);
         }
 
+        /**
+         * Keep the exact JWT used for the STK request out of the browser while it
+         * is needed for delayed status reconciliation.
+         */
+        private function prepare_status_fallback($order, $token) {
+            if (function_exists('as_unschedule_all_actions')) {
+                as_unschedule_all_actions('tuma_reconcile_payment_status', array($order->get_id()), 'tuma-payments');
+            } else {
+                wp_clear_scheduled_hook('tuma_reconcile_payment_status', array($order->get_id()));
+            }
+            set_transient('tuma_status_token_' . $order->get_id(), $token, HOUR_IN_SECONDS);
+            $order->update_meta_data('_tuma_stk_started_at', time());
+            $order->delete_meta_data('_tuma_last_status_query_at');
+            $order->delete_meta_data('_tuma_confirmation_source');
+            $order->delete_meta_data('_tuma_failure_reason');
+            $order->delete_meta_data('_tuma_result_code');
+            $order->delete_meta_data('_tuma_result_desc');
+            $order->update_meta_data('_tuma_status_query_attempts', 0);
+            $order->set_transaction_id('');
+            if (in_array($order->get_status(), array('failed', 'cancelled'), true)) {
+                $order->set_status('pending');
+            }
+            $this->schedule_status_reconciliation($order->get_id(), self::STATUS_FALLBACK_DELAY);
+        }
+
+        private function schedule_status_reconciliation($order_id, $delay) {
+            $timestamp = time() + max(1, (int) $delay);
+            if (function_exists('as_schedule_single_action')) {
+                as_schedule_single_action($timestamp, 'tuma_reconcile_payment_status', array($order_id), 'tuma-payments');
+            } elseif (!wp_next_scheduled('tuma_reconcile_payment_status', array($order_id))) {
+                wp_schedule_single_event($timestamp, 'tuma_reconcile_payment_status', array($order_id));
+            }
+        }
+
+        private function status_failure_details($result_code, $result_desc = '') {
+            $failures = array(
+                1    => array('failed', 'Insufficient balance in M-Pesa account'),
+                1032 => array('cancelled', 'Transaction cancelled by user'),
+                2001 => array('failed', 'Invalid M-Pesa PIN entered'),
+                1037 => array('failed', 'MPESA number unreachable. Restart phone'),
+                17   => array('failed', 'Bank unable to process payment. Retry after 20-30 seconds'),
+            );
+
+            if (isset($failures[$result_code])) {
+                return $failures[$result_code];
+            }
+
+            return array('failed', $result_desc !== '' ? $result_desc : 'Payment failed');
+        }
+
+        private function complete_from_status_query($order, $data) {
+            if ($order->is_paid()) {
+                return;
+            }
+
+            $receipt = isset($data['mpesa_receipt_number']) ? trim((string) $data['mpesa_receipt_number']) : '';
+            $old_status = $order->get_status();
+
+            if ($receipt !== '' && strtoupper($receipt) !== 'N/A') {
+                $order->set_transaction_id($receipt);
+                $order->update_meta_data('_tuma_mpesa_receipt', $receipt);
+                $order->payment_complete($receipt);
+                $receipt_note = ' Receipt Number: ' . $receipt . '.';
+            } else {
+                // A status query confirms the payment but does not return the
+                // receipt from the original M-Pesa callback.
+                $order->payment_complete();
+                $receipt_note = ' M-Pesa receipt number was not returned by the status query.';
+            }
+
+            $order->update_status('completed', 'Payment completed via M-Pesa status query');
+            $order->update_meta_data('_tuma_confirmation_source', 'status_query');
+            $order->update_meta_data('_tuma_result_code', 0);
+            $order->update_meta_data('_tuma_result_desc', isset($data['result_desc']) ? $data['result_desc'] : 'Payment confirmed');
+            $order->add_order_note(sprintf(
+                'Full MPesa Payment confirmed by manual status query.%s Order status changed from %s to Completed.',
+                $receipt_note,
+                ucfirst(str_replace('-', ' ', $old_status))
+            ));
+            $order->save();
+
+            $notification_data = array(
+                'phone' => $order->get_meta('_tuma_phone'),
+                'amount' => $order->get_total(),
+                'checkout_request_id' => $order->get_meta('_tuma_checkout_request_id'),
+            );
+            if ($receipt !== '' && strtoupper($receipt) !== 'N/A') {
+                $notification_data['mpesa_receipt_number'] = $receipt;
+            }
+            $this->send_payment_success_sms($order, $notification_data);
+            delete_transient('tuma_status_token_' . $order->get_id());
+        }
+
+        private function fail_from_status_query($order, $status, $reason, $result_code, $result_desc) {
+            if ($order->is_paid()) {
+                return;
+            }
+
+            $wc_status = $status === 'cancelled' ? 'cancelled' : 'failed';
+            $order->set_transaction_id('fail');
+            $order->update_status($wc_status, 'M-Pesa payment ' . $wc_status . ': ' . $reason);
+            $order->update_meta_data('_tuma_confirmation_source', 'status_query');
+            $order->update_meta_data('_tuma_result_code', $result_code);
+            $order->update_meta_data('_tuma_result_desc', $result_desc);
+            $order->update_meta_data('_tuma_failure_reason', $reason);
+            $order->add_order_note(sprintf(
+                'M-Pesa status query returned Result Code %s. Reason: %s',
+                $result_code,
+                $reason
+            ));
+            $order->save();
+
+            $this->send_payment_failure_sms($order, array(
+                'phone' => $order->get_meta('_tuma_phone'),
+                'amount' => $order->get_total(),
+                'checkout_request_id' => $order->get_meta('_tuma_checkout_request_id'),
+            ), $reason);
+            delete_transient('tuma_status_token_' . $order->get_id());
+        }
+
         public function webhook() {
             $payload = file_get_contents('php://input');
             $data = json_decode($payload, true);
@@ -1270,27 +1396,137 @@ function init_tuma_payments_gateway() {
             exit;
         }
 
-        public function check_payment_status() {
-            $order_id = sanitize_text_field($_GET['order_id']);
-            
-            if (!$order_id) {
-                wp_send_json_error(array('message' => 'Order ID required'));
-            }
-            
+        public function get_payment_status() {
+            $order_id = isset($_GET['order']) ? absint($_GET['order']) : 0;
+            $order_key = isset($_GET['key']) ? wc_clean(wp_unslash($_GET['key'])) : '';
             $order = wc_get_order($order_id);
-            if (!$order) {
-                wp_send_json_error(array('message' => 'Order not found'));
+
+            if (!$order || $order->get_payment_method() !== $this->id || $order_key === '' ||
+                !hash_equals((string) $order->get_order_key(), (string) $order_key)) {
+                wp_send_json_error(array('message' => 'Order not found'), 404);
             }
-            
-            $status = $order->get_status();
-            $transaction_id = $order->get_transaction_id();
-            
-            wp_send_json_success(array(
-                'status' => $status,
-                'transaction_id' => $transaction_id,
-                'is_completed' => in_array($status, array('completed', 'processing')),
-                'is_failed' => in_array($status, array('failed', 'cancelled'))
+
+            wp_send_json_success($this->reconcile_payment_status($order));
+        }
+
+        public function reconcile_scheduled_payment($order_id) {
+            $order = wc_get_order(absint($order_id));
+            if (!$order || $order->get_payment_method() !== $this->id) {
+                return;
+            }
+
+            $result = $this->reconcile_payment_status($order);
+            if (isset($result['status']) && $result['status'] === 'pending' &&
+                get_transient('tuma_status_token_' . $order->get_id())) {
+                $delay = isset($result['retry_after']) ? $result['retry_after'] : self::STATUS_QUERY_INTERVAL;
+                $this->schedule_status_reconciliation($order->get_id(), $delay);
+            }
+        }
+
+        private function reconcile_payment_status($order) {
+            $order_id = $order->get_id();
+
+            if ($order->is_paid()) {
+                delete_transient('tuma_status_token_' . $order_id);
+                return array('status' => 'completed');
+            }
+
+            if (in_array($order->get_status(), array('failed', 'cancelled'), true)) {
+                delete_transient('tuma_status_token_' . $order_id);
+                return array(
+                    'status' => $order->get_status(),
+                    'message' => $order->get_meta('_tuma_failure_reason'),
+                );
+            }
+
+            $started_at = (int) $order->get_meta('_tuma_stk_started_at');
+            $wait = self::STATUS_FALLBACK_DELAY - (time() - $started_at);
+            if ($started_at > 0 && $wait > 0) {
+                return array('status' => 'pending', 'retry_after' => $wait);
+            }
+
+            $last_query = (int) $order->get_meta('_tuma_last_status_query_at');
+            if ($last_query > 0 && (time() - $last_query) < self::STATUS_QUERY_INTERVAL) {
+                return array(
+                    'status' => 'pending',
+                    'retry_after' => self::STATUS_QUERY_INTERVAL - (time() - $last_query),
+                );
+            }
+
+            $checkout_request_id = (string) $order->get_meta('_tuma_checkout_request_id');
+            $token = get_transient('tuma_status_token_' . $order_id);
+            if ($checkout_request_id === '' || !$token) {
+                error_log('Tuma status fallback unavailable for order ' . $order_id . ': missing checkout ID or original token');
+                return array('status' => 'pending');
+            }
+
+            // Save before the HTTP request to prevent simultaneous customer tabs
+            // from spending multiple status checks for the same order.
+            $order->update_meta_data('_tuma_last_status_query_at', time());
+            $order->update_meta_data('_tuma_status_query_attempts', (int) $order->get_meta('_tuma_status_query_attempts') + 1);
+            $order->save();
+
+            $response = wp_remote_post($this->api_base_url . '/payment/status', array(
+                'headers' => array(
+                    'Authorization' => 'Bearer ' . $token,
+                    'Content-Type' => 'application/json',
+                ),
+                'body' => wp_json_encode(array('checkout_request_id' => $checkout_request_id)),
+                'timeout' => 30,
             ));
+
+            if (is_wp_error($response)) {
+                error_log('Tuma status query error for order ' . $order_id . ': ' . $response->get_error_message());
+                return array('status' => 'pending');
+            }
+
+            $http_status = wp_remote_retrieve_response_code($response);
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+            if ($http_status < 200 || $http_status >= 300 || !is_array($body)) {
+                error_log('Tuma status query returned HTTP ' . $http_status . ' for order ' . $order_id);
+                return array('status' => 'pending');
+            }
+
+            // Current Spring API response: { success, transaction: { status } }.
+            if (isset($body['transaction']) && is_array($body['transaction'])) {
+                $transaction = $body['transaction'];
+                $status = isset($transaction['status']) ? strtolower((string) $transaction['status']) : 'pending';
+                if ($status === 'completed') {
+                    $order = wc_get_order($order_id);
+                    $transaction['result_desc'] = 'Payment confirmed by Tuma payment status';
+                    $this->complete_from_status_query($order, $transaction);
+                } elseif (in_array($status, array('failed', 'cancelled'), true)) {
+                    $order = wc_get_order($order_id);
+                    $reason = !empty($transaction['failure_reason']) ? $transaction['failure_reason'] : 'Payment failed';
+                    $this->fail_from_status_query($order, $status, $reason, '', $reason);
+                }
+
+                return array('status' => $status, 'message' => isset($reason) ? $reason : '');
+            }
+
+            // Direct M-Pesa query response: ResultCode 0 succeeds; every other
+            // valid ResultCode is treated as a final failure, as documented.
+            $response_code = isset($body['ResponseCode']) ? (string) $body['ResponseCode'] : '';
+            $returned_checkout = isset($body['CheckoutRequestID']) ? (string) $body['CheckoutRequestID'] : '';
+            if ($response_code !== '0' || $returned_checkout !== $checkout_request_id || !isset($body['ResultCode']) ||
+                filter_var($body['ResultCode'], FILTER_VALIDATE_INT) === false) {
+                error_log('Tuma status query returned an invalid response for order ' . $order_id);
+                return array('status' => 'pending');
+            }
+
+            $result_code = (int) $body['ResultCode'];
+            $result_desc = isset($body['ResultDesc']) ? sanitize_text_field($body['ResultDesc']) : '';
+
+            if ($result_code === 0) {
+                $order = wc_get_order($order_id);
+                $this->complete_from_status_query($order, array('result_desc' => $result_desc));
+                return array('status' => 'completed');
+            }
+
+            list($status, $reason) = $this->status_failure_details($result_code, $result_desc);
+            $order = wc_get_order($order_id);
+            $this->fail_from_status_query($order, $status, $reason, $result_code, $result_desc);
+            return array('status' => $status, 'message' => $reason);
         }
         
         // Get transaction receipt like original M-Pesa plugin
@@ -1305,12 +1541,16 @@ function init_tuma_payments_gateway() {
                     'number'  => 1,
                 ));
 
-                $response = array(
-                    'receipt'                 => $order->get_transaction_id(),
-                    'note'                    => $notes[0],
-                    'user_token'              => $order->get_meta('user_token'),
-                    'user_token_instructions' => $order->get_meta('user_token_instructions'),
-                );
+                if ($order) {
+                    $response = array(
+                        'receipt'                    => $order->get_transaction_id(),
+                        'payment_status'             => $order->get_status(),
+                        'confirmed_without_receipt'  => $order->is_paid() && !$order->get_transaction_id(),
+                        'note'                       => !empty($notes) ? $notes[0] : null,
+                        'user_token'                 => $order->get_meta('user_token'),
+                        'user_token_instructions'    => $order->get_meta('user_token_instructions'),
+                    );
+                }
             }
 
             exit(wp_send_json($response));
@@ -1366,6 +1606,7 @@ function init_tuma_payments_gateway() {
                 $order->update_meta_data('_tuma_payment_id', $response['data']['payment_id']);
                 $order->update_meta_data('_tuma_merchant_request_id', $response['data']['merchant_request_id']);
                 $order->update_meta_data('_tuma_checkout_request_id', $response['data']['checkout_request_id']);
+                $this->prepare_status_fallback($order, $token);
                 $order->save();
                 
                 $order->add_order_note(
@@ -1492,6 +1733,7 @@ function init_tuma_payments_gateway() {
                 if (!empty($sale_data['checkout_request_id'])) {
                     $order->update_meta_data('_tuma_checkout_request_id', $sale_data['checkout_request_id']);
                 }
+                $this->prepare_status_fallback($order, $token);
                 $order->save();
                 
                 $order->add_order_note(
@@ -1850,7 +2092,9 @@ function init_tuma_payments_gateway() {
             wp_localize_script('tuma-payment-js', 'tuma_ajax', array(
                 'ajax_url' => admin_url('admin-ajax.php'),
                 'nonce' => wp_create_nonce('tuma_payment_status'),
-                'check_status_url' => home_url('wc-api/tuma_status')
+                'check_status_url' => home_url('wc-api/tuma_status'),
+                'status_delay_ms' => self::STATUS_FALLBACK_DELAY * 1000,
+                'status_interval_ms' => self::STATUS_QUERY_INTERVAL * 1000,
             ));
         }
 
@@ -1929,7 +2173,7 @@ function init_tuma_payments_gateway() {
                 'shipping'       => (float) $order->get_shipping_total() + (float) $order->get_shipping_tax(),
                 'total'          => (float) $order->get_total(),
                 'payment_method' => $order->get_payment_method_title(),
-                'transaction_id' => $order->get_transaction_id() ?: $order->get_meta('_tuma_mpesa_receipt'),
+                'transaction_id' => $order->get_transaction_id() ?: ($order->get_meta('_tuma_mpesa_receipt') ?: 'Not available (status query)'),
                 'items'          => $items,
             ));
 
@@ -1991,6 +2235,20 @@ function add_tuma_payments_gateway($gateways) {
     return $gateways;
 }
 add_filter('woocommerce_payment_gateways', 'add_tuma_payments_gateway');
+
+// Ensure scheduled reconciliation can initialize the gateway during cron and
+// Action Scheduler requests where payment gateways are not loaded beforehand.
+add_action('tuma_reconcile_payment_status', function($order_id) {
+    if (!function_exists('WC') || !WC()->payment_gateways()) {
+        return;
+    }
+
+    $gateways = WC()->payment_gateways()->payment_gateways();
+    if (isset($gateways['tuma_payments']) &&
+        is_callable(array($gateways['tuma_payments'], 'reconcile_scheduled_payment'))) {
+        $gateways['tuma_payments']->reconcile_scheduled_payment($order_id);
+    }
+});
 
 // Make paid receipts available from My Account > Orders as well.
 add_filter('woocommerce_my_account_my_orders_actions', function($actions, $order) {

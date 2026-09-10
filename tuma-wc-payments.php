@@ -3,13 +3,13 @@
 /**
  * @package Tuma Payments for WooCommerce
  * @author Tuma Payments < matata@tuma.co.ke >
- * @version 1.4.2
+ * @version 1.4.3
  *
  * Plugin Name: Tuma Payments for WooCommerce
  * Plugin URI: https://merchant.tuma.co.ke/
  * Description: This plugin extends WordPress and WooCommerce functionality to integrate your online shop with bank accounts to accept and process online payments via M-Pesa. Supports product variations sync with Tuma POS.
  * Author: Shadrack Matata < matata@tuma.co.ke >
- * Version: 1.4.2
+ * Version: 1.4.3
  * Author URI: https://twitter.com/shadrac_matata/
  *
  * Requires at least: 6.7
@@ -28,7 +28,7 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-define('TUMA_WC_VER', '1.4.2');
+define('TUMA_WC_VER', '1.4.3');
 if (!defined('TUMA_WC_PLUGIN_FILE')) {
     define('TUMA_WC_PLUGIN_FILE', __FILE__);
 }
@@ -657,6 +657,35 @@ function init_tuma_payments_gateway() {
         }
 
         /**
+         * Add the effective discounted unit price expected by the POS Sales API.
+         * WooCommerce line totals already include product-sale and coupon discounts;
+         * taxes are included here because calculate_pos_shipping_fee() treats product
+         * totals as tax-inclusive when separating additional order charges.
+         */
+        private function add_discounted_price_to_sale_item($sale_item, $item, $product) {
+            $quantity = max(1, intval($item->get_quantity()));
+            $subtotal = floatval($item->get_subtotal()) + floatval($item->get_subtotal_tax());
+            $total = floatval($item->get_total()) + floatval($item->get_total_tax());
+            $has_coupon_discount = $total < ($subtotal - 0.00001);
+            $has_sale_price = method_exists($product, 'is_on_sale') && $product->is_on_sale();
+
+            if ($has_coupon_discount || $has_sale_price) {
+                $precision = max(6, function_exists('wc_get_price_decimals') ? wc_get_price_decimals() + 4 : 6);
+                $sale_item['price'] = round($total / $quantity, $precision);
+
+                error_log(sprintf(
+                    'Tuma POS discounted unit price: product_id=%s, quantity=%d, price=%s, source=%s',
+                    $sale_item['product_id'],
+                    $quantity,
+                    $sale_item['price'],
+                    $has_coupon_discount ? 'coupon' : 'sale'
+                ));
+            }
+
+            return $sale_item;
+        }
+
+        /**
          * Process payment through Tuma POS Sales API
          * This syncs the order with POS inventory
          */
@@ -741,6 +770,8 @@ function init_tuma_payments_gateway() {
                 if (!empty($tuma_variant_id)) {
                     $sale_item['product_variant_id'] = $tuma_variant_id;
                 }
+
+                $sale_item = $this->add_discounted_price_to_sale_item($sale_item, $item, $product);
                 
                 $items[] = $sale_item;
             }
@@ -1405,6 +1436,8 @@ function init_tuma_payments_gateway() {
                 if (!empty($tuma_variant_id)) {
                     $sale_item['product_variant_id'] = $tuma_variant_id;
                 }
+
+                $sale_item = $this->add_discounted_price_to_sale_item($sale_item, $item, $product);
                 
                 $items[] = $sale_item;
             }

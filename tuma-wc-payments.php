@@ -120,15 +120,6 @@ add_action('admin_notices', function () {
     }
 });
 
-// Enqueue scripts and styles
-add_action('wp_enqueue_scripts', function () {
-    if (is_checkout()) {
-        wp_enqueue_style("tuma-wc-styles", plugins_url("assets/styles.css", __FILE__));
-        wp_enqueue_script('jquery');
-        wp_enqueue_script("tuma-wc-scripts", plugins_url("assets/scripts.js", __FILE__), array("jquery"), false, true);
-    }
-});
-
 // Declare compatibility with WooCommerce features
 add_action('before_woocommerce_init', function() {
     if (class_exists('\Automattic\WooCommerce\Utilities\FeaturesUtil')) {

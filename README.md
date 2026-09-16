@@ -122,6 +122,12 @@ If you use Tuma POS for your physical store, you can enable inventory and sales 
    - Stock is deducted from POS inventory
    - Order status updates automatically on payment confirmation
 
+3. **Other payment gateways and manual orders**:
+   - When POS Sync is enabled, paid orders completed through another gateway or manually in WooCommerce automatically deduct their line quantities from Tuma POS
+   - Tuma POS Sales API orders are excluded because their stock is already managed by POS
+   - Sync is queued immediately and failed lines retry every 5 minutes, up to 12 attempts
+   - Every order line uses an idempotency reference, so status hooks and retries cannot deduct the same stock twice
+
 ### Product Sync Status
 
 After enabling product sync, you can see the sync status in **Products > All Products**:

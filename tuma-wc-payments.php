@@ -172,6 +172,7 @@ function init_tuma_payments_gateway() {
         public $sms_token;
         public $sms_sender_id;
         public $admin_number;
+        public $sms_templates = array();
         private $callback_order;
 
         const STATUS_FALLBACK_DELAY = 45;
@@ -209,6 +210,12 @@ function init_tuma_payments_gateway() {
             $this->sms_token     = $this->get_option('mobilesasa_token');
             $this->sms_sender_id = $this->get_option('mobilesasa_sender_id');
             $this->admin_number  = $this->get_option('admin_number');
+            $this->sms_templates = array(
+                'customer_success' => $this->get_option('sms_customer_success_template', self::default_sms_template('customer_success')),
+                'customer_failure' => $this->get_option('sms_customer_failure_template', self::default_sms_template('customer_failure')),
+                'admin_success'    => $this->get_option('sms_admin_success_template', self::default_sms_template('admin_success')),
+                'admin_failure'    => $this->get_option('sms_admin_failure_template', self::default_sms_template('admin_failure')),
+            );
 
             // Initialize gateway settings
             add_action('woocommerce_update_options_payment_gateways_' . $this->id, array($this, 'process_admin_options'));
@@ -223,6 +230,7 @@ function init_tuma_payments_gateway() {
             add_action('woocommerce_thankyou_' . $this->id, array($this, 'thankyou_page'));
             add_action('woocommerce_admin_field_tuma_test_connection', array($this, 'generate_tuma_test_connection_html'));
             add_action('woocommerce_admin_field_tuma_sync_products_button', array($this, 'generate_tuma_sync_products_button_html'));
+            add_action('woocommerce_admin_field_tuma_sms_placeholders', array($this, 'generate_tuma_sms_placeholders_html'));
             
             // Enqueue scripts on order received page
             add_action('wp_enqueue_scripts', array($this, 'payment_scripts'));
@@ -359,7 +367,81 @@ function init_tuma_payments_gateway() {
                     'desc_tip'    => true,
                     'class'       => 'tuma-sms-field',
                 ),
+                'sms_templates_section' => array(
+                    'title'       => 'SMS Message Templates',
+                    'type'        => 'title',
+                    'description' => 'Write your own message for each notification. Anything in curly braces is replaced with the real order details when the SMS is sent. Clear a template to stop that message being sent.',
+                    'class'       => 'tuma-sms-field',
+                ),
+                'sms_placeholders' => array(
+                    'title'       => 'Available Variables',
+                    'type'        => 'tuma_sms_placeholders',
+                    'description' => 'Click a variable to insert it into the message you are editing.',
+                    'class'       => 'tuma-sms-field',
+                ),
+                'sms_customer_success_template' => array(
+                    'title'       => 'Customer - Payment Successful',
+                    'type'        => 'textarea',
+                    'description' => 'Sent to the customer once the payment is confirmed.',
+                    'default'     => self::default_sms_template('customer_success'),
+                    'class'       => 'tuma-sms-field tuma-sms-template',
+                ),
+                'sms_customer_failure_template' => array(
+                    'title'       => 'Customer - Payment Failed',
+                    'type'        => 'textarea',
+                    'description' => 'Sent to the customer when the payment fails or is cancelled.',
+                    'default'     => self::default_sms_template('customer_failure'),
+                    'class'       => 'tuma-sms-field tuma-sms-template',
+                ),
+                'sms_admin_success_template' => array(
+                    'title'       => 'Admin - Payment Successful',
+                    'type'        => 'textarea',
+                    'description' => 'Sent to the Admin Phone Number when a payment succeeds.',
+                    'default'     => self::default_sms_template('admin_success'),
+                    'class'       => 'tuma-sms-field tuma-sms-template',
+                ),
+                'sms_admin_failure_template' => array(
+                    'title'       => 'Admin - Payment Failed',
+                    'type'        => 'textarea',
+                    'description' => 'Sent to the Admin Phone Number when a payment fails.',
+                    'default'     => self::default_sms_template('admin_failure'),
+                    'class'       => 'tuma-sms-field tuma-sms-template',
+                ),
             );
+        }
+
+        /**
+         * Placeholders that can be used inside the SMS templates, with a short
+         * description and a sample value for the settings screen reference.
+         */
+        public static function sms_placeholder_help() {
+            return array(
+                'amount'         => array('Amount paid', '4,600'),
+                'currency'       => array('Order currency code', 'KES'),
+                'receipt'        => array('M-Pesa transaction/receipt number', 'UJ6HZ8QQLI'),
+                'order_number'   => array('WooCommerce order number', '1042'),
+                'order_total'    => array('Order total', '4,600'),
+                'customer_name'  => array('Customer billing first name', 'Jane'),
+                'customer_phone' => array('Customer M-Pesa number', '254712345678'),
+                'admin_number'   => array('Admin phone number set above', '0723579644'),
+                'failure_reason' => array('Why a payment failed (failure messages only)', 'Request cancelled by user'),
+                'site_name'      => array('Your store name', 'My Shop'),
+            );
+        }
+
+        /**
+         * Built-in message templates, used as defaults and as a fallback when a
+         * stored template is missing.
+         */
+        public static function default_sms_template($type) {
+            $defaults = array(
+                'customer_success' => 'Hi, we have received your order and {currency} {amount} payment via MPESA transaction {receipt}. Thank you call {admin_number}.',
+                'customer_failure' => 'Hi, your {currency} {amount} payment has failed due to {failure_reason}. Try again.',
+                'admin_success'    => 'Order #{order_number} paid. {currency} {amount} received from {customer_phone} via MPESA transaction {receipt}.',
+                'admin_failure'    => 'Order #{order_number} payment failed. Customer {customer_phone}. Amount {currency} {amount}. Reason {failure_reason}.',
+            );
+
+            return isset($defaults[$type]) ? $defaults[$type] : '';
         }
 
         public function payment_fields() {
@@ -473,6 +555,50 @@ function init_tuma_payments_gateway() {
         }
 
         /**
+         * Build the placeholder values shared by all SMS templates.
+         */
+        private function get_sms_template_vars($order, $data, $extra = array()) {
+            $phone   = $this->get_callback_phone($data, $order);
+            $receipt = isset($data['mpesa_receipt_number']) ? $data['mpesa_receipt_number'] : $order->get_transaction_id();
+
+            $vars = array(
+                'amount'         => $this->format_sms_amount(isset($data['amount']) ? $data['amount'] : $order->get_total()),
+                'currency'       => $order->get_currency() ? $order->get_currency() : 'KES',
+                'receipt'        => $receipt ? $receipt : 'unavailable',
+                'order_number'   => $order->get_order_number(),
+                'order_total'    => $this->format_sms_amount($order->get_total()),
+                'customer_name'  => $order->get_billing_first_name(),
+                'customer_phone' => $phone ? $phone : 'unknown number',
+                'admin_number'   => $this->admin_number,
+                'failure_reason' => '',
+                'site_name'      => get_bloginfo('name'),
+            );
+
+            return array_merge($vars, $extra);
+        }
+
+        /**
+         * Replace {placeholders} in a stored template. Unknown placeholders are
+         * left untouched so typos are visible instead of silently dropped.
+         */
+        private function render_sms_template($type, $vars) {
+            $template = isset($this->sms_templates[$type]) ? trim((string) $this->sms_templates[$type]) : '';
+            if ('' === $template) {
+                return '';
+            }
+
+            $replacements = array();
+            foreach ($vars as $key => $value) {
+                $replacements['{' . $key . '}'] = (string) $value;
+            }
+
+            $message = strtr($template, $replacements);
+
+            // Collapse whitespace left behind by empty placeholders.
+            return trim(preg_replace('/[ \t]+/', ' ', $message));
+        }
+
+        /**
          * Send an SMS through the Mobile Sasa API.
          */
         private function send_sms($phone, $message) {
@@ -526,30 +652,17 @@ function init_tuma_payments_gateway() {
                 return;
             }
 
-            $phone   = $this->get_callback_phone($data, $order);
-            $amount  = $this->format_sms_amount(isset($data['amount']) ? $data['amount'] : $order->get_total());
-            $receipt = isset($data['mpesa_receipt_number']) ? $data['mpesa_receipt_number'] : $order->get_transaction_id();
-            $receipt = $receipt ? $receipt : 'unavailable';
+            $phone = $this->get_callback_phone($data, $order);
+            $vars  = $this->get_sms_template_vars($order, $data);
 
             if ($phone) {
-                $this->send_sms($phone, sprintf(
-                    'Hi, we have received your order and KES %s payment via MPESA transaction %s. Thank you call %s.',
-                    $amount,
-                    $receipt,
-                    $this->admin_number
-                ));
+                $this->send_sms($phone, $this->render_sms_template('customer_success', $vars));
             }
 
             if (!empty($this->admin_number)) {
                 $admin_phone = $this->normalize_phone_number($this->admin_number);
                 if ($admin_phone) {
-                    $this->send_sms($admin_phone, sprintf(
-                        'Order #%s paid. KES %s received from %s via MPESA transaction %s.',
-                        $order->get_order_number(),
-                        $amount,
-                        $phone ? $phone : 'unknown number',
-                        $receipt
-                    ));
+                    $this->send_sms($admin_phone, $this->render_sms_template('admin_success', $vars));
                 }
             }
 
@@ -567,27 +680,17 @@ function init_tuma_payments_gateway() {
                 return;
             }
 
-            $phone  = $this->get_callback_phone($data, $order);
-            $amount = $this->format_sms_amount(isset($data['amount']) ? $data['amount'] : $order->get_total());
+            $phone = $this->get_callback_phone($data, $order);
+            $vars  = $this->get_sms_template_vars($order, $data, array('failure_reason' => $reason));
 
             if ($phone) {
-                $this->send_sms($phone, sprintf(
-                    'Hi, your KES %s payment has failed due to %s. Try again.',
-                    $amount,
-                    $reason
-                ));
+                $this->send_sms($phone, $this->render_sms_template('customer_failure', $vars));
             }
 
             if (!empty($this->admin_number)) {
                 $admin_phone = $this->normalize_phone_number($this->admin_number);
                 if ($admin_phone) {
-                    $this->send_sms($admin_phone, sprintf(
-                        'Order #%s payment failed. Customer %s. Amount KES %s. Reason %s.',
-                        $order->get_order_number(),
-                        $phone ? $phone : 'unknown number',
-                        $amount,
-                        $reason
-                    ));
+                    $this->send_sms($admin_phone, $this->render_sms_template('admin_failure', $vars));
                 }
             }
 
@@ -1997,6 +2100,54 @@ function init_tuma_payments_gateway() {
             return ob_get_clean();
         }
 
+        /**
+         * Reference table of the template variables, with click-to-insert
+         * buttons that drop the variable into the message being edited.
+         */
+        public function generate_tuma_sms_placeholders_html($key, $data) {
+            $field_key    = $this->get_field_key($key);
+            $data         = wp_parse_args($data, array('title' => '', 'class' => '', 'description' => ''));
+            $placeholders = self::sms_placeholder_help();
+
+            ob_start();
+            ?>
+            <tr valign="top" class="<?php echo esc_attr($data['class']); ?>">
+                <th scope="row" class="titledesc">
+                    <label for="<?php echo esc_attr($field_key); ?>"><?php echo wp_kses_post($data['title']); ?></label>
+                </th>
+                <td class="forminp">
+                    <table class="widefat striped tuma-placeholder-table" style="max-width:640px;">
+                        <thead>
+                            <tr>
+                                <th style="width:170px;">Variable</th>
+                                <th>Replaced with</th>
+                                <th style="width:170px;">Example</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                        <?php foreach ($placeholders as $tag => $info) : ?>
+                            <tr>
+                                <td>
+                                    <button type="button" class="button button-small tuma-placeholder-chip" data-token="{<?php echo esc_attr($tag); ?>}" title="Insert {<?php echo esc_attr($tag); ?>}">
+                                        <code>{<?php echo esc_html($tag); ?>}</code>
+                                    </button>
+                                </td>
+                                <td><?php echo esc_html($info[0]); ?></td>
+                                <td><?php echo esc_html($info[1]); ?></td>
+                            </tr>
+                        <?php endforeach; ?>
+                        </tbody>
+                    </table>
+                    <?php if (!empty($data['description'])) : ?>
+                        <p class="description"><?php echo wp_kses_post($data['description']); ?></p>
+                    <?php endif; ?>
+                    <p class="description" id="tuma-placeholder-target">No message selected — click inside a message box below first.</p>
+                </td>
+            </tr>
+            <?php
+            return ob_get_clean();
+        }
+
         public function generate_tuma_sync_products_button_html($key, $data) {
             $field_key = $this->get_field_key($key);
             $defaults  = array(
@@ -2116,15 +2267,90 @@ function init_tuma_payments_gateway() {
                 }
 
                 var rows = $('.tuma-sms-field').closest('tr');
+                var headings = $('h3.tuma-sms-field');
+                var headingDescriptions = headings.next('p');
 
                 function refresh() {
-                    rows.toggle(toggle.is(':checked'));
+                    var on = toggle.is(':checked');
+                    rows.toggle(on);
+                    headings.toggle(on);
+                    headingDescriptions.toggle(on);
                 }
 
                 toggle.on('change', refresh);
                 refresh();
+
+                // --- SMS template helpers -----------------------------------
+                var defaults = <?php echo wp_json_encode(array(
+                    'woocommerce_tuma_payments_sms_customer_success_template' => self::default_sms_template('customer_success'),
+                    'woocommerce_tuma_payments_sms_customer_failure_template' => self::default_sms_template('customer_failure'),
+                    'woocommerce_tuma_payments_sms_admin_success_template'    => self::default_sms_template('admin_success'),
+                    'woocommerce_tuma_payments_sms_admin_failure_template'    => self::default_sms_template('admin_failure'),
+                )); ?>;
+                var templates = $('textarea.tuma-sms-template');
+                var target = null;
+                var targetLabel = $('#tuma-placeholder-target');
+
+                templates.each(function() {
+                    var field = $(this);
+                    var label = $('label[for="' + field.attr('id') + '"]').text();
+
+                    field.attr('rows', 3).css('width', '100%');
+                    field.after(
+                        '<p class="description tuma-template-meta">' +
+                        '<span class="tuma-template-count"></span>' +
+                        ' &middot; <a href="#" class="tuma-template-reset">Restore default</a>' +
+                        '</p>'
+                    );
+                    field.data('label', label);
+
+                    function count() {
+                        var len = field.val().length;
+                        var parts = Math.max(1, Math.ceil(len / 160));
+                        field.siblings('.tuma-template-meta').find('.tuma-template-count')
+                            .text(len + ' characters (' + parts + ' SMS ' + (parts === 1 ? 'part' : 'parts') + ' before variables are filled in)');
+                    }
+
+                    field.on('input focus', count);
+                    count();
+                });
+
+                templates.on('focus click keyup', function() {
+                    target = this;
+                    targetLabel.text('Inserting into: ' + $(this).data('label'));
+                });
+
+                $('.tuma-placeholder-chip').on('click', function() {
+                    var token = $(this).data('token');
+                    if (!target) {
+                        targetLabel.text('Click inside a message box below, then pick a variable.');
+                        return;
+                    }
+
+                    var start = target.selectionStart || 0;
+                    var end = target.selectionEnd || 0;
+                    var value = target.value;
+                    target.value = value.slice(0, start) + token + value.slice(end);
+                    target.selectionStart = target.selectionEnd = start + token.length;
+                    target.focus();
+                    $(target).trigger('input');
+                });
+
+                $(document).on('click', '.tuma-template-reset', function(e) {
+                    e.preventDefault();
+                    var field = $(this).closest('.tuma-template-meta').prev('textarea');
+                    var id = field.attr('id');
+                    if (defaults[id] !== undefined) {
+                        field.val(defaults[id]).trigger('input').focus();
+                    }
+                });
             });
             </script>
+            <style>
+            .tuma-placeholder-table code { background: transparent; padding: 0; }
+            .tuma-placeholder-chip { cursor: pointer; }
+            .tuma-template-meta { margin-top: 4px; }
+            </style>
             <?php
         }
 
@@ -2158,6 +2384,8 @@ function init_tuma_payments_gateway() {
                 } elseif (!$this->normalize_phone_number($this->get_option('admin_number'))) {
                     WC_Admin_Settings::add_error('Tuma Payments: The Admin Phone Number is not a valid Kenyan mobile number.');
                 }
+
+                $this->validate_sms_templates();
             }
             
             // Auto-test connection when saving if credentials are provided
@@ -2171,6 +2399,38 @@ function init_tuma_payments_gateway() {
             }
             
             return $saved;
+        }
+
+        /**
+         * Warn the admin about unknown placeholders so a typo like {ammount}
+         * is not silently sent out in a live SMS.
+         */
+        private function validate_sms_templates() {
+            $known = array_keys(self::sms_placeholder_help());
+            $fields = array(
+                'sms_customer_success_template' => 'Customer - Payment Successful',
+                'sms_customer_failure_template' => 'Customer - Payment Failed',
+                'sms_admin_success_template'    => 'Admin - Payment Successful',
+                'sms_admin_failure_template'    => 'Admin - Payment Failed',
+            );
+
+            foreach ($fields as $key => $label) {
+                $template = trim((string) $this->get_option($key));
+                if ('' === $template) {
+                    continue;
+                }
+
+                preg_match_all('/\{([a-z0-9_]+)\}/i', $template, $matches);
+                $unknown = array_unique(array_diff($matches[1], $known));
+                if ($unknown) {
+                    WC_Admin_Settings::add_error(sprintf(
+                        'Tuma Payments: The "%s" SMS template uses unknown placeholders: %s. Supported placeholders are %s.',
+                        $label,
+                        '{' . implode('}, {', $unknown) . '}',
+                        '{' . implode('}, {', $known) . '}'
+                    ));
+                }
+            }
         }
 
         private function test_api_connection($email, $api_key) {

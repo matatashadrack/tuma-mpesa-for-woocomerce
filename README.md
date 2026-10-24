@@ -166,11 +166,32 @@ Send an SMS to the customer and the admin whenever a payment succeeds or fails.
 5. Enter an approved **Sender ID** (case-sensitive, e.g. `MOBILESASA`)
 6. Enter the **Admin Phone Number** — it is included in the customer SMS and receives the admin alerts
 
-### Messages sent
-- **Customer, payment successful**: `Hi, we have received your order and KES {amount} payment via MPESA transaction {mpesa_receipt_number}. Thank you call {admin_number}.`
-- **Customer, payment failed**: `Hi, your KES {amount} payment has failed due to {failure_reason}. Try again.`
-- **Admin, payment successful**: order number, amount, customer number and M-Pesa receipt
-- **Admin, payment failed**: order number, customer number, amount and failure reason
+### Messages sent (customisable)
+Each of the four messages has its own template field under **SMS Message Templates**. The defaults are:
+- **Customer, payment successful**: `Hi, we have received your order and {currency} {amount} payment via MPESA transaction {receipt}. Thank you call {admin_number}.`
+- **Customer, payment failed**: `Hi, your {currency} {amount} payment has failed due to {failure_reason}. Try again.`
+- **Admin, payment successful**: `Order #{order_number} paid. {currency} {amount} received from {customer_phone} via MPESA transaction {receipt}.`
+- **Admin, payment failed**: `Order #{order_number} payment failed. Customer {customer_phone}. Amount {currency} {amount}. Reason {failure_reason}.`
+
+Clearing a template stops that particular message from being sent.
+
+### Template placeholders
+| Placeholder | Value |
+| --- | --- |
+| `{amount}` | Amount paid, e.g. `4,600` |
+| `{currency}` | Order currency code, e.g. `KES` |
+| `{receipt}` | M-Pesa transaction/receipt number (`unavailable` if not supplied) |
+| `{order_number}` | WooCommerce order number |
+| `{order_total}` | Order total |
+| `{customer_name}` | Customer billing first name |
+| `{customer_phone}` | Customer M-Pesa number |
+| `{admin_number}` | Admin phone number from the settings |
+| `{failure_reason}` | Reason a payment failed (failure messages only) |
+| `{site_name}` | Your store name |
+
+The same table is shown in the plugin settings under **Available Variables**: click inside the message you want to edit, then click a variable to insert it at the cursor. Each message box also shows a character/SMS-part count and a **Restore default** link.
+
+Unknown placeholders are left in the text as-is and the settings screen shows an error when you save, so typos such as `{ammount}` are caught before going live.
 
 The customer number is taken from the last 10 digits of the callback's `checkout_request_id`, falling back to the number stored on the order. Messages are sent from the payment callback, and are de-duplicated so repeated callbacks do not resend the same SMS.
 

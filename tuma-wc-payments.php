@@ -423,7 +423,7 @@ function init_tuma_payments_gateway() {
                 'order_total'    => array('Order total', '4,600'),
                 'customer_name'  => array('Customer billing first name', 'Jane'),
                 'customer_phone' => array('Customer M-Pesa number', '254712345678'),
-                'admin_number'   => array('Admin phone number set above', '0723579644'),
+                'admin_number'   => array('Admin phone number set above', '0709876543'),
                 'failure_reason' => array('Why a payment failed (failure messages only)', 'Request cancelled by user'),
                 'site_name'      => array('Your store name', 'My Shop'),
             );
